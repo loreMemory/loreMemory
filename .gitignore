@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checking
+.mypy_cache/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment
+.env
+.env.*
+
+# Data and cache
+data/
+graph_cache.json
+
+# Claude
+.claude/
+.mcp.json
+
+# Test / working files
+output-v3/
+lore_data/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,13 @@
+services:
+  lore:
+    build: .
+    environment:
+      - LORE_DATA_DIR=/data
+      - LORE_EMBEDDING_DIMS=${LORE_EMBEDDING_DIMS:-64}
+    volumes:
+      - lore_data:/data
+    ports:
+      - "${LORE_PORT:-8000}:8000"
+
+volumes:
+  lore_data:

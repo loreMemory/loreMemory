@@ -1,0 +1,55 @@
+{
+  "Personal": {
+    "accuracy": "5/5",
+    "score": 1.0
+  },
+  "Chat": {
+    "recall": "3/3",
+    "score": 1.0
+  },
+  "Isolation": {
+    "users": 10,
+    "leaks": 0,
+    "passed": true
+  },
+  "Multi-User": {
+    "shared_visible": true,
+    "salary_leak": false,
+    "passed": true
+  },
+  "Latency": {
+    "n=100": {
+      "write_per_fact_ms": 8.377,
+      "read_p50_ms": 14.47
+    },
+    "n=500": {
+      "write_per_fact_ms": 8.223,
+      "read_p50_ms": 15.22
+    },
+    "n=1000": {
+      "write_per_fact_ms": 7.929,
+      "read_p50_ms": 20.65
+    },
+    "n=2000": {
+      "write_per_fact_ms": 7.864,
+      "read_p50_ms": 23.78
+    },
+    "n=5000": {
+      "write_per_fact_ms": 7.729,
+      "read_p50_ms": 33.13
+    }
+  },
+  "Feedback": {
+    "weights_adapted": false,
+    "weights": {
+      "semantic": 0.3,
+      "keyword": 0.15,
+      "temporal": 0.1,
+      "belief": 0.15,
+      "frequency": 0.1,
+      "graph": 0.1,
+      "resonance": 0.1,
+      "updates": 0
+    }
+  }
+}

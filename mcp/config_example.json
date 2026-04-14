@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lore-memory": {
+      "command": "python3",
+      "args": ["/path/to/lore-memory/mcp/server.py"]
+    }
+  }
+}
