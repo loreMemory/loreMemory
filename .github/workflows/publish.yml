@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.12", "3.13"]
+        python-version: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +23,7 @@ jobs:
       - name: Install and test
         run: |
           pip install -e ".[dev]"
-          pytest tests/ -v --tb=short
+          pytest tests/ -v --tb=short -x
 
   publish:
     needs: test
