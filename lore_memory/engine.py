@@ -10,6 +10,7 @@ Architecture:
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -27,6 +28,45 @@ from lore_memory.repo import recent_commits, file_tree, commits_to_memories, tre
 from lore_memory.retrieval import Retriever, SearchResult
 from lore_memory.scopes import Scope, Context, scope_db_path, can_access
 from lore_memory.store import Memory, MemoryDB
+
+
+_COMMIT_PREFIXES = (
+    "fix", "feat", "chore", "refactor", "docs",
+    "style", "perf", "ci", "build", "revert",
+)
+_COMMIT_MSG_RE = re.compile(
+    r'^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)\s*(\([^)]+\))?\s*:'
+)
+_VOWELS = set("aeiouAEIOU")
+
+
+def _is_profile_worthy(f) -> bool:
+    """Return True if a fact should appear in a user profile.
+
+    Filters out garbage predicates (single-char, no vowels, too long) and
+    commit-origin facts that leak into personal profiles.
+    """
+    pred = f.predicate
+    # Skip raw-text bucket
+    if pred == "stated":
+        return False
+    # Single-character predicates are always garbage (e.g. pred='a')
+    if len(pred) <= 1:
+        return False
+    # Overly long predicates are parsing artifacts
+    if len(pred) > 25:
+        return False
+    # Commit-like compound predicates (e.g. 'fixredi', 'featauth')
+    if any(pred.startswith(p) and len(pred) > len(p) and pred != p
+           for p in _COMMIT_PREFIXES):
+        return False
+    # Predicates with no vowels are likely garbage (e.g. 'te_bk_s')
+    if not any(ch in _VOWELS for ch in pred):
+        return False
+    # Source text that looks like a conventional commit message
+    if f.source_text and _COMMIT_MSG_RE.match(f.source_text):
+        return False
+    return True
 
 
 DB_CACHE_MAX = 100  # Max open MemoryDB connections before LRU eviction
@@ -317,6 +357,8 @@ class Engine:
             for f in db.query_by_subject(subject):
                 if not f.is_active:
                     continue
+                if not _is_profile_worthy(f):
+                    continue
                 prof.setdefault(f.predicate, []).append({
                     "value": f.object_value, "confidence": round(f.posterior, 3),
                     "evidence": f.evidence_count, "negation": f.is_negation,
@@ -457,7 +499,7 @@ class Engine:
         token_est = 0  # rough: 1 token ≈ 4 chars
 
         for f in facts:
-            if not f.is_active or f.predicate == "stated":
+            if not f.is_active or not _is_profile_worthy(f):
                 continue
             neg = "not " if f.is_negation else ""
             line = f"{f.predicate}: {neg}{f.object_value}"

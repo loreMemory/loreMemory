@@ -33,6 +33,17 @@ _FIRST_PERSON = frozenset({
     "user", "current_user", "the user",
 })
 
+_RELATIONSHIP_NOUNS = frozenset({
+    "manager", "boss", "supervisor", "director",
+    "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
+    "brother", "sister", "mother", "father", "mom", "dad",
+    "son", "daughter", "aunt", "uncle", "cousin",
+    "grandmother", "grandfather", "grandma", "grandpa",
+    "friend", "coworker", "colleague", "neighbor", "mentor",
+    "teacher", "professor", "pet", "dog", "cat",
+    "team", "parents", "family",
+})
+
 
 @dataclass
 class SubjectResolver:
@@ -63,6 +74,12 @@ class SubjectResolver:
             return self.canonical_id
 
         s = subject.strip().lower()
+
+        # Possessive + relationship noun → third-party entity, not the user
+        if s.startswith("my "):
+            remainder = s[3:].strip()
+            if any(word in _RELATIONSHIP_NOUNS for word in remainder.split()):
+                return subject  # preserve original case
 
         # First-person pronouns always resolve to canonical user
         if s in _FIRST_PERSON:

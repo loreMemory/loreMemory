@@ -92,8 +92,18 @@ _CONJUNCTIONS = frozenset({
 })
 
 _FILLERS = frozenset({
-    "well", "yeah", "yes", "actually", "honestly", "basically",
-    "really", "just", "also", "so", "okay", "ok",
+    "well", "yeah", "yep", "yes", "nah", "nope", "actually", "honestly",
+    "basically", "really", "just", "also", "so", "okay", "ok",
+    "lol", "haha", "idk", "tbh", "imo", "btw", "hmm", "oh", "wow",
+    "mostly", "probably", "maybe", "perhaps", "definitely", "certainly",
+})
+
+# Adverbs that can appear between auxiliary and main verb — skip in verb search
+_ADVERBS = frozenset({
+    "currently", "still", "now", "already", "always", "usually",
+    "sometimes", "often", "recently", "lately", "presently",
+    "mostly", "probably", "maybe", "perhaps", "definitely", "certainly",
+    "never", "ever", "just", "really", "actually", "also",
 })
 
 # Multi-word modifiers that should be consumed as a unit
@@ -456,7 +466,16 @@ def parse_sentence(sentence: str) -> dict | None:
     sentence = re.sub(r"\bI'll\b", "I will", sentence, flags=re.IGNORECASE)
     sentence = re.sub(r"\bI'd\b", "I would", sentence, flags=re.IGNORECASE)
     sentence = re.sub(r"\b(\w+)'re\b", r"\1 are", sentence)
-    sentence = re.sub(r"\b(\w+)'s\b(?!\s+\w+ing)", r"\1 is", sentence)  # "he's" but not possessive before gerund
+    # Expand "'s" to "is" only for pronouns and similar; keep possessive for nouns
+    _CONTRACTION_PRONOUNS = {"he", "she", "it", "that", "what", "who", "there",
+                             "here", "everyone", "somebody", "someone",
+                             "everything", "anything", "nothing", "nobody"}
+    def _expand_s(m: re.Match) -> str:
+        word = m.group(1)
+        if word.lower() in _CONTRACTION_PRONOUNS:
+            return word + " is"
+        return m.group(0)  # keep as possessive
+    sentence = re.sub(r"\b(\w+)'s\b", _expand_s, sentence)
     sentence = re.sub(r"\b(\w+)'ve\b", r"\1 have", sentence)
     sentence = re.sub(r"\b(\w+)'ll\b", r"\1 will", sentence)
 
@@ -465,6 +484,31 @@ def parse_sentence(sentence: str) -> dict | None:
         return None
 
     tokens = [_clean_token(w) for w in words]
+
+    # Pre-check: detect "My X is Y" pattern where X is a relationship/role noun
+    # This prevents the copula from being skipped when the object starts with a verb-form word
+    _MY_REL_NOUNS_EARLY = frozenset({
+        "manager", "boss", "supervisor", "director",
+        "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
+        "brother", "sister", "mother", "father", "mom", "dad",
+        "son", "daughter", "aunt", "uncle", "cousin",
+        "grandmother", "grandfather", "grandma", "grandpa",
+        "friend", "coworker", "colleague", "neighbor", "mentor",
+        "teacher", "professor", "therapist", "doctor", "lawyer", "dentist",
+        "pet", "dog", "cat", "favorite",
+        "name", "birthday", "email", "phone", "age", "salary",
+    })
+    _is_my_rel_pattern = False
+    if tokens[0] == "my" and len(tokens) >= 3:
+        for k in range(1, min(4, len(tokens))):
+            tk = re.sub(r"'s$", "", tokens[k]) if tokens[k] else tokens[k]
+            if tk in _MY_REL_NOUNS_EARLY:
+                # Check there's a copula somewhere after
+                for c in range(k + 1, min(k + 4, len(tokens))):
+                    if tokens[c] in _COPULAS:
+                        _is_my_rel_pattern = True
+                        break
+                break
 
     # Phase 1: Identify subject span
     subj_end = 0
@@ -494,6 +538,11 @@ def parse_sentence(sentence: str) -> dict | None:
                             and jt.endswith("s") and not jt.endswith("ss")
                             and not jt.endswith("us")):
                         break
+                    # Stop if this word is followed by a preposition (likely a verb)
+                    if j > i + 1:
+                        next_after = tokens[j + 1] if j + 1 < len(tokens) else ""
+                        if next_after in _PREPOSITIONS:
+                            break
                     subj_end = j + 1
             continue
 
@@ -588,7 +637,7 @@ def parse_sentence(sentence: str) -> dict | None:
             is_negation = True
             continue
 
-        if tok in _FILLERS:
+        if tok in _FILLERS or tok in _ADVERBS:
             continue
 
         # Modals (can, will, must, etc.) — ALWAYS skip, next word is the verb
@@ -609,13 +658,14 @@ def parse_sentence(sentence: str) -> dict | None:
             # If yes: this is an auxiliary ("I am working", "I have finished")
             # If no: this IS the main verb ("I am a dev", "I have kids")
             next_main_original = None
-            for j in range(i + 1, min(i + 4, len(tokens))):
+            for j in range(i + 1, min(i + 6, len(tokens))):
                 jt = tokens[j]
-                if jt in _DETERMINERS or jt in _FILLERS:
+                if jt in _DETERMINERS or jt in _FILLERS or jt in _ADVERBS:
                     continue
                 next_main_original = words[j]  # original case for proper noun detection
                 break
-            if next_main_original and _looks_like_verb_form(next_main_original):
+            if (next_main_original and _looks_like_verb_form(next_main_original)
+                    and not _is_my_rel_pattern):
                 continue  # skip auxiliary, main verb is next
             else:
                 verb_idx = i  # copula/have IS the verb
@@ -629,6 +679,11 @@ def parse_sentence(sentence: str) -> dict | None:
         return None
 
     verb = tokens[verb_idx]
+
+    # Fix: if verb is a preposition and there was a copula/auxiliary, combine
+    # "been at" → "be_at", "been to" → "be_to"
+    if verb in _PREPOSITIONS and aux_idx >= 0:
+        verb = f"be_{verb}"
 
     # Phase 3a: Copula + adjective + preposition pattern
     # "I am passionate about ML" → pred=passionate_about, obj=ML
@@ -702,6 +757,55 @@ def parse_sentence(sentence: str) -> dict | None:
     # Build subject text
     subj_text = " ".join(words[:subj_end]).strip(".,!?;:\"'")
 
+    # --- "My X is Y" → predicate=X when X is a relationship/role noun ---
+    _RELATIONSHIP_NOUNS = frozenset({
+        "manager", "boss", "supervisor", "director",
+        "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
+        "brother", "sister", "mother", "father", "mom", "dad",
+        "son", "daughter", "aunt", "uncle", "cousin",
+        "grandmother", "grandfather", "grandma", "grandpa",
+        "friend", "coworker", "colleague", "neighbor", "mentor",
+        "teacher", "professor", "therapist", "doctor", "lawyer", "dentist",
+        "pet", "dog", "cat",
+        "name", "birthday", "email", "phone", "age", "salary",
+        "favorite",
+    })
+    _ATTRIBUTE_NOUNS = {"name", "birthday", "job", "role", "age", "email",
+                        "phone", "title", "address", "salary"}
+
+    subj_lower_stripped = subj_text.lower().strip()
+    if (predicate in ("am", "is", "be", "is_a")
+            and subj_lower_stripped.startswith("my ")):
+        rest = subj_lower_stripped[3:].strip()
+        rest_words = rest.split()
+        # Handle possessive form: "My wife's name" → rest_words = ["wife's", "name"]
+        # or after _clean_token: subj tokens are ["my", "wifes", "name"]
+        # Check if any word in the rest is a relationship noun
+        found_rel = None
+        found_attr = None
+        for rw in rest_words:
+            rw_clean = re.sub(r"'s$", "", rw)  # strip possessive
+            rw_clean = re.sub(r"s$", "", rw_clean) if rw_clean.endswith("s") and rw_clean not in _RELATIONSHIP_NOUNS else rw_clean
+            if rw_clean in _RELATIONSHIP_NOUNS:
+                found_rel = rw_clean
+            if rw in _ATTRIBUTE_NOUNS or rw_clean in _ATTRIBUTE_NOUNS:
+                found_attr = rw
+        # "My favorite X is Y" → predicate=favorite_X
+        if found_rel == "favorite" and len(rest_words) >= 2:
+            # "my favorite book" → predicate="favorite_book"
+            fav_obj = rest_words[-1]  # the noun after "favorite"
+            fav_obj_clean = re.sub(r"'s$", "", fav_obj)
+            if fav_obj_clean in _ATTRIBUTE_NOUNS:
+                predicate = _norm(fav_obj_clean)
+            else:
+                predicate = _norm(f"favorite_{fav_obj_clean}")
+        elif found_attr and found_rel and found_attr != found_rel:
+            # "My wife's name is Emma" → predicate=name
+            predicate = _norm(found_attr)
+        elif found_rel:
+            # "My manager is Sarah Chen" → predicate=manager
+            predicate = _norm(found_rel)
+
     return {
         "subject": subj_text,
         "verb": verb,
@@ -758,8 +862,35 @@ def extract_personal(text: str, user_id: str, subject: str = "",
 
         pred = parsed["predicate"]
         obj = parsed["object"]
+
+        # Check if subject is a third-party reference ("My brother", "My manager")
+        _TP_RELATIONSHIP_NOUNS = frozenset({
+            "manager", "boss", "supervisor", "director",
+            "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
+            "brother", "sister", "mother", "father", "mom", "dad",
+            "son", "daughter", "aunt", "uncle", "cousin",
+            "grandmother", "grandfather", "grandma", "grandpa",
+            "friend", "coworker", "colleague", "neighbor", "mentor",
+            "teacher", "professor", "therapist", "doctor", "lawyer", "dentist",
+            "pet", "dog", "cat", "parents", "kids", "children", "family",
+        })
+        is_third_party_my = False
+        if subj_lower.startswith("my "):
+            rest_words = subj_lower[3:].split()
+            for rw in rest_words:
+                rw_clean = re.sub(r"'s?$", "", rw)
+                if rw_clean in _TP_RELATIONSHIP_NOUNS:
+                    is_third_party_my = True
+                    break
+
         # For implicit subject (empty), use the context subject
-        mem_subject = subject if is_first_person or not parsed["subject"] else parsed["subject"]
+        # But keep "My brother" etc. as the subject (third-party reference)
+        if is_third_party_my:
+            mem_subject = parsed["subject"]
+        elif is_first_person or not parsed["subject"]:
+            mem_subject = subject
+        else:
+            mem_subject = parsed["subject"]
         # Third-person facts from nested clauses get lower confidence
         conf = 0.85 if is_first_person else 0.65
 

@@ -429,7 +429,10 @@ class TestSingleEntry:
     def test_single_memory_profile(self, engine):
         engine.store_personal("u1", "I live in Amsterdam")
         p = engine.profile("u1", "u1")
-        assert "stated" in p
+        # "stated" is filtered from profiles as a raw-text bucket predicate;
+        # structured extraction should produce a meaningful predicate instead.
+        assert "stated" not in p
+        assert len(p) >= 1  # At least one structured predicate present
 
     def test_single_memory_consolidate(self, engine):
         engine.store_fact("private", "personal", "u1", "name", "Alice",
@@ -1531,7 +1534,7 @@ class TestFullConversationalParagraph:
                           and m.object_value == "Berlin" and m.is_negation]
         assert len(used_to_berlin) >= 1, "Should extract retraction 'used to live in Berlin'"
 
-        name_marcus = [m for m in structured if m.predicate == "is"
+        name_marcus = [m for m in structured if m.predicate in ("is", "name")
                        and m.object_value == "Marcus"]
         assert len(name_marcus) >= 1, "Should extract 'name is Marcus'"
 

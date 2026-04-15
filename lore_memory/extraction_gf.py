@@ -115,9 +115,12 @@ def detect_source_type(text: str) -> SourceType:
     if kv_count >= 2:
         return SourceType("kv_pairs", 0.9)
 
-    # Email signature: name | title | company pattern
-    if "|" in text_stripped and len(text_stripped.split("|")) >= 3:
-        return SourceType("email_signature", 0.85)
+    # Email signature: name | title | company pattern — but NOT tables
+    if "|" in text_stripped:
+        lines = text_stripped.split("\n")
+        parts = [p.strip() for p in lines[0].split("|")]
+        if len(parts) >= 3 and len(lines) <= 2:
+            return SourceType("email_signature", 0.85)
 
     # Git commit: starts with type(scope): or type:
     if re.match(r'^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)\s*(\([^)]+\))?\s*:', text_stripped):
@@ -131,8 +134,24 @@ def detect_source_type(text: str) -> SourceType:
     if re.search(r'[→\->=>]', text_stripped):
         return SourceType("fragment", 0.7)
 
+    # Resume format: section headers + dash-separated entries
+    if re.search(r'^[A-Z]{3,}', text_stripped) and ('—' in text_stripped or '–' in text_stripped or ' - ' in text_stripped):
+        return SourceType("resume", 0.8)
+
     # Fragment: very short, no verb-like structure
     words = text_stripped.split()
+
+    # Check for subject+verb pattern before declaring fragment (F1 fix)
+    _COMMON_VERBS = {"like", "love", "hate", "use", "want", "need", "know", "think",
+                     "work", "live", "speak", "read", "write", "build", "run", "play",
+                     "prefer", "enjoy", "study", "teach", "learn", "make", "go", "come",
+                     "eat", "drink", "sleep", "drive", "fly", "swim", "cook"}
+    _SUBJECT_WORDS = {"i", "you", "he", "she", "we", "they", "it"}
+    words_lower = [w.lower() for w in words]
+    if len(words) >= 2 and len(words) <= 4:
+        if words_lower[0] in _SUBJECT_WORDS and any(w in _COMMON_VERBS for w in words_lower[1:]):
+            return SourceType("sentence", 0.5)
+
     if len(words) <= 4 and not any(w.lower() in ("is", "am", "are", "was", "were",
                                                     "have", "has", "had", "do", "does")
                                    for w in words):
@@ -237,16 +256,47 @@ def _extract_commit(text: str, user_id: str) -> list[dict]:
 def _extract_social(text: str, user_id: str) -> list[dict]:
     """Extract from social media format: '@user works_at Google #tech'."""
     results = []
-    # Remove @mentions and #hashtags, extract the core statement
-    cleaned = re.sub(r'[@#]\w+', '', text).strip()
-    # Hashtags as topics
+    # Extract @mentions
+    for m in re.finditer(r'@(\w+)', text):
+        results.append({
+            "subject": m.group(1),
+            "predicate": "mentioned",
+            "object": text[:100],
+            "confidence": 0.5,
+        })
+    # Extract ticket references (e.g. PAYMENTS-1234)
+    for m in re.finditer(r'([A-Z]+-\d+)', text):
+        results.append({
+            "subject": user_id,
+            "predicate": "works_on",
+            "object": m.group(1),
+            "confidence": 0.6,
+        })
+    # Extract #hashtags
     for m in re.finditer(r'#(\w+)', text):
         results.append({
             "subject": user_id,
-            "predicate": "interested_in",
+            "predicate": "tagged",
             "object": m.group(1),
             "confidence": 0.5,
         })
+    return results
+
+
+def _extract_resume(text: str, user_id: str) -> list[dict]:
+    """Extract from resume/CV format: 'EXPERIENCE\\nStartupCo — Tech Lead (2022–present)'."""
+    results = []
+    for line in text.strip().split("\n"):
+        # Match: Company — Role (dates)
+        m = re.match(r'(.+?)\s*[—–\-]\s*(.+?)(?:\s*\((.+?)\))?\s*$', line.strip())
+        if m and not line.strip().isupper():  # Skip section headers
+            company = m.group(1).strip()
+            role = m.group(2).strip()
+            dates = m.group(3).strip() if m.group(3) else ""
+            results.append({"subject": user_id, "predicate": "works_at", "object": company, "confidence": 0.75})
+            results.append({"subject": user_id, "predicate": "job_title", "object": role, "confidence": 0.75})
+            if dates:
+                results.append({"subject": user_id, "predicate": "period", "object": f"{company}: {dates}", "confidence": 0.6})
     return results
 
 
@@ -302,6 +352,19 @@ def _extract_fragment(text: str, user_id: str) -> list[dict]:
     elif len(fragments) == 1 and len(fragments[0].split()) <= 3:
         # Single short fragment — store as stated, can't extract reliable SPO
         pass
+
+    # Single word/very short — store as a skill/topic mention
+    if not results:
+        words = text_stripped.split()
+        if len(words) == 1:
+            word = words[0].strip(".,;:!?")
+            if word and len(word) > 1:
+                results.append({
+                    "subject": user_id,
+                    "predicate": "mentions",
+                    "object": word,
+                    "confidence": 0.4,
+                })
 
     return results
 
@@ -533,6 +596,8 @@ class GrammarFreeExtractor:
             return _extract_commit(text, user_id)
         elif source_type.type == "social":
             return _extract_social(text, user_id)
+        elif source_type.type == "resume":
+            return _extract_resume(text, user_id)
         elif source_type.type == "fragment":
             return _extract_fragment(text, user_id)
         else:

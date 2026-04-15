@@ -213,6 +213,17 @@ class Retriever:
             # Predicate alignment: detect query intent and match predicates
             pred_boost = self._predicate_alignment(query, cands)
 
+            # Negation alignment: boost negation facts for negation queries
+            neg_boost = self._negation_alignment(query, cands)
+
+            # Temporal alignment: boost older/retracted facts for temporal queries
+            temporal_boost = self._temporal_query_alignment(query, cands)
+
+            # Broad query detection: boost high-evidence facts
+            q_lower = query.lower()
+            broad_query_markers = {"tell me about", "what do you know", "what about", "describe", "summarize"}
+            is_broad = any(marker in q_lower for marker in broad_query_markers)
+
             # Scoring: RRF base (k=20) + predicate alignment + SPO bonus
             for m in cands:
                 # RRF base score from all 7 channels
@@ -232,6 +243,22 @@ class Retriever:
                 pa = pred_boost.get(m.id, 0.0)
                 if pa > 0:
                     rrf *= (1.0 + pa)
+
+                # Negation alignment: boost/penalize based on negation match
+                na = neg_boost.get(m.id, 0.0)
+                if na > 0:
+                    rrf *= (1.0 + na)
+                elif na < 0:
+                    rrf *= max(0.1, 1.0 + na)  # penalize but don't zero out
+
+                # Temporal alignment: boost older/retracted facts
+                ta = temporal_boost.get(m.id, 0.0)
+                if ta > 0:
+                    rrf *= (1.0 + ta)
+
+                # For broad queries, boost high-evidence facts
+                if is_broad:
+                    rrf *= (1.0 + 0.3 * min(m.evidence_count, 5) / 5)
 
                 # Structured SPO bonus: prefer extracted triples over raw text
                 if m.predicate != "stated":
@@ -369,6 +396,23 @@ class Retriever:
         "exercise": {"do", "go_to", "practice"},
         "before": {"be_at", "work_at", "was_at"},
         "previous": {"be_at", "work_at", "was_at"},
+        "learn": {"think_about", "want_to", "plan_to", "interested_in", "study"},
+        "planning": {"think_about", "want_to", "plan_to", "work_on"},
+        "interested": {"think_about", "interested_in", "like", "love"},
+        "want": {"want_to", "plan_to", "think_about"},
+        "reading": {"am", "read", "currently"},
+        "eat": {"allergic_to", "vegetarian", "vegan", "diet"},
+        "food": {"allergic_to", "vegetarian", "vegan", "eat", "like"},
+        "allergic": {"allergic_to"},
+        "manager": {"is", "manager", "report_to"},
+        "birthday": {"is", "birthday", "born_on"},
+        "name": {"is", "name", "call"},
+        "age": {"am", "is", "age"},
+        "children": {"have", "own"},
+        "kids": {"have", "own"},
+        "married": {"have", "is", "partner", "wife", "husband"},
+        "cloud": {"use", "deploy_to", "host_on", "run_on"},
+        "aws": {"deploy_to", "use", "host_on"},
     }
 
     def _predicate_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
@@ -394,6 +438,41 @@ class Retriever:
                     q.startswith(p) or p.startswith(q) for q in q_terms_low if len(q) > 2))
                 if overlap > 0:
                     scores[m.id] = 0.5
+        return scores
+
+    def _negation_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
+        """Boost negation facts when query asks about negation."""
+        q_lower = query.lower()
+        negation_words = {"doesn't", "don't", "can't", "cannot", "not", "never",
+                          "hate", "dislike", "won't", "wouldn't", "shouldn't",
+                          "doesn", "dont", "cant", "wont"}
+        has_negation = any(w in q_lower.split() for w in negation_words) or "n't" in q_lower
+        if not has_negation:
+            return {}
+
+        scores: dict[str, float] = {}
+        for m in cands:
+            if m.is_negation:
+                scores[m.id] = 1.5  # strong boost for negation facts
+            elif m.predicate in ("like", "love", "enjoy", "prefer", "want"):
+                scores[m.id] = -0.3  # penalize positive sentiment when asking about negatives
+        return scores
+
+    def _temporal_query_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
+        """Boost older/retracted facts when query asks about the past."""
+        q_lower = query.lower()
+        temporal_words = {"before", "previous", "previously", "used to", "formerly",
+                          "past", "earlier", "old", "prior", "ago"}
+        has_temporal = any(w in q_lower for w in temporal_words)
+        if not has_temporal:
+            return {}
+
+        scores: dict[str, float] = {}
+        for m in cands:
+            if m.is_negation:
+                scores[m.id] = 1.0  # retracted facts are past facts
+            if m.predicate in ("be_at", "was_at", "previously"):
+                scores[m.id] = scores.get(m.id, 0) + 0.8
         return scores
 
     # --- Channel scoring functions ---

@@ -21,6 +21,7 @@ from typing import Any
 
 from lore_memory.store import Memory, MemoryDB, cosine_sim
 from lore_memory.normalization import NormalizationPipeline
+from lore_memory.belief import is_single_valued
 
 
 @dataclass
@@ -158,6 +159,17 @@ class DedupEngine:
             if ex.predicate == "stated":
                 continue  # Don't dedup structured against raw text
 
+            # Never dedup across negation boundaries
+            if ex.is_negation != new_mem.is_negation:
+                continue
+
+            # Same subject+predicate but different objects on multi-valued predicates → not duplicate
+            if (ex.subject == new_mem.subject
+                    and ex.predicate == new_mem.predicate
+                    and ex.object_value.lower() != new_mem.object_value.lower()
+                    and not is_single_valued(new_mem.predicate)):
+                continue
+
             sim = cosine_sim(new_mem.embedding, ex.embedding)
             if sim >= self._near_threshold:
                 # Additional check: predicates should be related
@@ -218,6 +230,17 @@ class DedupEngine:
         existing = db.query_by_subject(new_mem.subject, limit=200)
         for ex in existing:
             if ex.state != "active" or ex.predicate == "stated":
+                continue
+
+            # Never dedup across negation boundaries
+            if ex.is_negation != new_mem.is_negation:
+                continue
+
+            # Same subject+predicate but different objects on multi-valued predicates → not duplicate
+            if (ex.subject == new_mem.subject
+                    and ex.predicate == new_mem.predicate
+                    and ex.object_value.lower() != new_mem.object_value.lower()
+                    and not is_single_valued(new_mem.predicate)):
                 continue
 
             # Check if existing predicate is in the same cluster
