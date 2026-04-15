@@ -32,7 +32,7 @@
 pip install loremem-ai
 ```
 
-That's it. No dependencies. Python 3.9+.
+That's it. Python 3.9+. Includes `sentence-transformers` for semantic search.
 
 <br>
 
@@ -91,10 +91,10 @@ Your AI now remembers everything across conversations.
 <tr>
 <td align="center" width="33%">
 <br>
-<img src="https://img.shields.io/badge/0-dependencies-5A5BFF?style=for-the-badge" alt="0 deps">
+<img src="https://img.shields.io/badge/local-first-5A5BFF?style=for-the-badge" alt="local-first">
 <br><br>
-<b>Zero Dependencies</b><br>
-<sub>Python stdlib + SQLite. No API keys.<br>No cloud. No external services.</sub>
+<b>Local-First</b><br>
+<sub>SQLite + sentence-transformers.<br>No API keys. No cloud. No cost.</sub>
 <br><br>
 </td>
 <td align="center" width="33%">

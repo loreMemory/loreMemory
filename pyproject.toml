@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loremem-ai"
-version = "1.0.1"
-description = "Persistent AI memory for LLMs and AI agents. Zero dependencies. Local-first. Learns from every interaction."
+version = "1.0.2"
+description = "Persistent AI memory for LLMs and AI agents. Local-first. Learns from every interaction."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["sentence-transformers>=2.0.0"]
 authors = [
     {name = "Lore Contributors"},
 ]
@@ -40,9 +40,7 @@ Issues = "https://github.com/loreMemory/loreMemory/issues"
 Changelog = "https://github.com/loreMemory/loreMemory/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-embeddings = ["sentence-transformers>=2.0.0"]
 api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
-all = ["sentence-transformers>=2.0.0", "fastapi>=0.100.0", "uvicorn>=0.20.0"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

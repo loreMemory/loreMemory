@@ -39,7 +39,7 @@
   <text x="450" y="175" text-anchor="middle" fill="#a0a0c0" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="400" letter-spacing="1">Persistent Memory for AI Agents</text>
 
   <!-- Tagline -->
-  <text x="450" y="210" text-anchor="middle" fill="#6366f1" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="500" letter-spacing="3">NO LLM  ·  NO CLOUD  ·  NO COST</text>
+  <text x="450" y="210" text-anchor="middle" fill="#6366f1" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="500" letter-spacing="3">NO LLM REQUIRED  ·  NO CLOUD  ·  LOCAL-FIRST</text>
 
   <!-- Bottom accent -->
   <rect x="350" y="267" width="200" height="3" rx="2" fill="url(#accent)" opacity="0.6" />
