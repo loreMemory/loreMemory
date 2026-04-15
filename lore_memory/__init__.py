@@ -10,7 +10,7 @@ Usage:
     print(results[0]["text"])  # "I work at Google and love Python"
 """
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 from lore_memory.memory import Memory
 
