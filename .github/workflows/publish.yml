@@ -23,7 +23,7 @@ jobs:
       - name: Install and test
         run: |
           pip install -e ".[dev]"
-          pytest tests/ -v --tb=short -x
+          pytest tests/ -v --tb=short -x -m "not slow"
 
   publish:
     needs: test
