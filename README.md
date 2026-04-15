@@ -2,11 +2,7 @@
 
 <br>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/hero.svg">
-  <source media="(prefers-color-scheme: light)" srcset=".github/assets/hero-light.svg">
-  <img alt="LoreMem" src=".github/assets/hero.svg" width="100%">
-</picture>
+<img alt="LoreMem — Persistent Memory for AI Agents" src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/hero.svg" width="100%">
 
 <br>
 
@@ -25,7 +21,7 @@
 <br>
 
 <div align="center">
-<img src=".github/assets/divider.svg" width="100%">
+<img src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/divider.svg" width="100%">
 </div>
 
 <br>
@@ -84,7 +80,7 @@ Your AI now remembers everything across conversations.
 <br>
 
 <div align="center">
-<img src=".github/assets/divider.svg" width="100%">
+<img src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/divider.svg" width="100%">
 </div>
 
 <br>
@@ -164,7 +160,7 @@ Your AI now remembers everything across conversations.
 <br>
 
 <div align="center">
-<img src=".github/assets/divider.svg" width="100%">
+<img src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/divider.svg" width="100%">
 </div>
 
 <br>
@@ -247,7 +243,7 @@ m.consolidate()                           # decay + replay + archive
 <br>
 
 <div align="center">
-<img src=".github/assets/divider.svg" width="100%">
+<img src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/divider.svg" width="100%">
 </div>
 
 <br>
@@ -297,7 +293,7 @@ m.consolidate()                           # decay + replay + archive
 <br>
 
 <div align="center">
-<img src=".github/assets/divider.svg" width="100%">
+<img src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/divider.svg" width="100%">
 </div>
 
 <br>
@@ -434,7 +430,7 @@ docker run -p 8420:8000 -v lore_data:/data loremem
 <br>
 
 <div align="center">
-<img src=".github/assets/divider.svg" width="100%">
+<img src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/divider.svg" width="100%">
 </div>
 
 <br>
