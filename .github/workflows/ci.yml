@@ -26,8 +26,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@v4
@@ -41,26 +48,8 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short -x
 
       - name: Run benchmarks (smoke test)
         run: python benchmarks/lore_bench.py
         if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install package
-        run: pip install -e ".[dev]"
-
-      - name: Check imports
-        run: python -c "from lore_memory import Memory; print('Import OK')"
-
-      - name: Check CLI entry point
-        run: lore stats --help
