@@ -210,15 +210,33 @@ class Retriever:
                 ranked_ids = sorted(scores, key=lambda x: scores[x], reverse=True)
                 rank_maps.append({sid: j for j, sid in enumerate(ranked_ids)})
 
-            # RRF merge
+            # Predicate alignment: detect query intent and match predicates
+            pred_boost = self._predicate_alignment(query, cands)
+
+            # Scoring: RRF base (k=20) + predicate alignment + SPO bonus
             for m in cands:
+                # RRF base score from all 7 channels
                 rrf = 0.0
                 ch: dict[str, float] = {}
                 for i, (scores, weight) in enumerate(channels):
                     raw = scores.get(m.id, 0.0)
                     ch[names[i]] = raw
                     rank = rank_maps[i].get(m.id, len(scores))
-                    rrf += weight * (1.0 / (60 + rank + 1))
+                    rrf += weight * (1.0 / (20 + rank + 1))
+
+                # Additive semantic score — break ties when RRF is close
+                sem_raw = sem.get(m.id, 0.0)
+                rrf += 0.05 * sem_raw
+
+                # Predicate alignment: strong multiplicative boost
+                pa = pred_boost.get(m.id, 0.0)
+                if pa > 0:
+                    rrf *= (1.0 + pa)
+
+                # Structured SPO bonus: prefer extracted triples over raw text
+                if m.predicate != "stated":
+                    rrf *= 1.2
+
                 if rrf > 0:
                     results.append(SearchResult(
                         memory=m, score=rrf, channel_scores=ch,
@@ -281,6 +299,103 @@ class Retriever:
         if result.channel_scores:
             self.get_weights(weight_key).update(result.channel_scores)
 
+    # --- Subject & Predicate alignment ---
+
+    def _subject_alignment(self, query: str, mem: Memory) -> float:
+        """Score how well the memory's subject matches the query's subject.
+        Returns positive for boost, negative for penalty, 0 for neutral."""
+        ql = query.lower()
+        subj_l = mem.subject.lower()
+
+        # Query mentions a possessive entity: "my parents", "my wife", "my brother"
+        _POSSESSIVE_ENTITIES = {
+            "parent": "my parent", "parents": "my parent",
+            "wife": "my wife", "husband": "my husband",
+            "brother": "my brother", "sister": "my sister",
+            "mother": "my mother", "father": "my father", "mom": "my mother", "dad": "my father",
+            "manager": "my manager", "boss": "my manager",
+            "coworker": "my coworker", "colleague": "my coworker",
+            "friend": "my friend",
+        }
+        for entity, subj_match in _POSSESSIVE_ENTITIES.items():
+            if entity in ql:
+                # Query is about a specific entity — boost memories about that entity
+                if entity in subj_l or subj_match.split()[-1] in subj_l:
+                    return 0.8  # strong boost
+                else:
+                    return -0.3  # penalize memories about other subjects
+
+        # Query is first-person ("where do I work", "what do I use")
+        # Penalize third-person subjects (wife, parents, etc.)
+        if ql.startswith(("where do i", "what do i", "do i ", "am i ", "how do i",
+                          "what am i", "where am i", "what language")):
+            if subj_l not in ("i", "we", mem.user_id.lower(), ""):
+                # This memory is about someone else (wife, parents, team)
+                # Only penalize if the subject looks like a third-party entity
+                for entity in _POSSESSIVE_ENTITIES:
+                    if entity in subj_l:
+                        return -0.4
+        return 0.0
+
+    # --- Predicate alignment ---
+
+    # Map query words to predicates they likely want
+    _QUERY_PRED_MAP: dict[str, set[str]] = {
+        "work": {"work_at", "works_at", "work_for", "employed_at", "be_at"},
+        "job": {"work_at", "works_at", "work_for", "be_at"},
+        "engineer": {"work_at", "be_at"},
+        "live": {"live_in", "lives_in", "move_to", "base_in", "reside_in"},
+        "located": {"live_in", "lives_in", "base_in"},
+        "parent": {"live_in", "lives_in"},
+        "use": {"use", "prefer", "run_on"},
+        "language": {"use", "speak", "know", "code_in"},
+        "speak": {"speak", "know"},
+        "like": {"like", "love", "enjoy", "prefer", "fan_of"},
+        "dislike": {"dislike", "hate", "not_like"},
+        "read": {"read", "reading"},
+        "study": {"study", "graduate_from", "major_in", "attend"},
+        "school": {"graduate_from", "study_at", "attend", "major_in"},
+        "university": {"graduate_from", "study_at", "attend"},
+        "pet": {"have", "own"},
+        "dog": {"have", "own"},
+        "cat": {"have", "own"},
+        "database": {"use", "is", "run_on"},
+        "team": {"have", "is", "manage", "build"},
+        "build": {"build", "work_on", "develop"},
+        "deploy": {"deploy_to", "use", "host_on"},
+        "ci": {"use", "run_on", "run"},
+        "coffee": {"drink", "prefer", "like", "hate"},
+        "tea": {"drink", "prefer", "like", "hate"},
+        "exercise": {"do", "go_to", "practice"},
+        "before": {"be_at", "work_at", "was_at"},
+        "previous": {"be_at", "work_at", "was_at"},
+    }
+
+    def _predicate_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
+        """Score memories whose predicate aligns with the query intent."""
+        q_lower = query.lower()
+        target_preds: set[str] = set()
+        for keyword, preds in self._QUERY_PRED_MAP.items():
+            if keyword in q_lower:
+                target_preds.update(preds)
+
+        if not target_preds:
+            return {}
+
+        scores: dict[str, float] = {}
+        for m in cands:
+            if m.predicate in target_preds:
+                scores[m.id] = 1.0
+            else:
+                # Partial match: check if predicate contains a query-relevant word
+                pred_parts = m.predicate.replace("_", " ").split()
+                q_terms_low = q_lower.split()
+                overlap = sum(1 for p in pred_parts if any(
+                    q.startswith(p) or p.startswith(q) for q in q_terms_low if len(q) > 2))
+                if overlap > 0:
+                    scores[m.id] = 0.5
+        return scores
+
     # --- Channel scoring functions ---
 
     def _kw_scores(self, terms: list[str], cands: list[Memory]) -> dict[str, float]:
@@ -288,14 +403,24 @@ class Retriever:
             return {}
         scores: dict[str, float] = {}
         for m in cands:
-            text = f"{m.subject} {m.predicate.replace('_', ' ')} {m.object_value} {m.source_text}"
-            doc = tokenize(text)
-            if not doc:
+            # Score source_text (raw) and structured fields separately
+            src_doc = tokenize(m.source_text)
+            obj_doc = tokenize(m.object_value)
+            pred_doc = tokenize(m.predicate.replace("_", " "))
+            all_doc = set(src_doc + obj_doc + pred_doc)
+            if not all_doc:
                 continue
             hits = sum(1 for qt in terms if any(
-                d.startswith(qt) or qt.startswith(d) for d in doc))
+                d.startswith(qt) or qt.startswith(d) for d in all_doc))
             if hits > 0:
-                scores[m.id] = hits / len(terms)
+                score = hits / len(terms)
+                # Bonus: if query terms appear in the object_value specifically
+                # (more targeted than appearing in source_text)
+                obj_hits = sum(1 for qt in terms if any(
+                    d.startswith(qt) or qt.startswith(d) for d in obj_doc))
+                if obj_hits > 0:
+                    score += 0.3 * (obj_hits / len(terms))
+                scores[m.id] = min(1.0, score)
         return scores
 
     def _temporal(self, cands: list[Memory], now: float) -> dict[str, float]:

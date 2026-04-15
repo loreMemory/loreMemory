@@ -17,9 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from lore_memory.belief import check_contradictions, check_cross_scope_contradictions, consolidate as run_consolidation, canon
+from lore_memory.belief import check_contradictions, check_cross_scope_contradictions, consolidate as run_consolidation, canon, ALIASES as BELIEF_ALIASES
+from lore_memory.dedup import DedupEngine, DedupResult, ProvenanceTracker
 from lore_memory.extraction import extract_personal, extract_chat, extract_company, _norm, Extractor
+from lore_memory.extraction_gf import GrammarFreeExtractor
 from lore_memory.graph import GraphCache
+from lore_memory.normalization import NormalizationPipeline
 from lore_memory.repo import recent_commits, file_tree, commits_to_memories, tree_to_memories, repo_id
 from lore_memory.retrieval import Retriever, SearchResult
 from lore_memory.scopes import Scope, Context, scope_db_path, can_access
@@ -72,6 +75,18 @@ class Engine:
 
         # Optional extractor — produces structured SPO in addition to raw text
         self._extractor = extractor
+
+        # Normalization pipeline — subject, predicate, object canonicalization
+        self._normalizers: dict[str, NormalizationPipeline] = {}
+
+        # Dedup engine — per-user, initialized lazily with normalizer
+        self._dedup_engines: dict[str, DedupEngine] = {}
+
+        # Provenance tracker — tracks origin and transformation of facts
+        self._provenance = ProvenanceTracker()
+
+        # Grammar-free extractor
+        self._gf_extractor = GrammarFreeExtractor(embed_fn=self._embed)
 
         self._retriever = Retriever(self._embed)
         self._graph = GraphCache(cache_path=self._data / "graph_cache.json")
@@ -135,23 +150,65 @@ class Engine:
             except Exception:
                 pass  # Don't let close failure block eviction
 
+    def _get_normalizer(self, user_id: str) -> NormalizationPipeline:
+        """Get or create the normalization pipeline for a user."""
+        if user_id not in self._normalizers:
+            normalizer = NormalizationPipeline(
+                embed_fn=self._embed, user_id=user_id)
+            # Seed with existing predicate aliases from belief.py
+            normalizer.seed_predicate_aliases(BELIEF_ALIASES)
+            self._normalizers[user_id] = normalizer
+        return self._normalizers[user_id]
+
+    def _get_dedup(self, user_id: str) -> DedupEngine:
+        """Get or create the dedup engine for a user."""
+        if user_id not in self._dedup_engines:
+            normalizer = self._get_normalizer(user_id)
+            self._dedup_engines[user_id] = DedupEngine(normalizer)
+        return self._dedup_engines[user_id]
+
     # --- Write API ---
 
-    def store_personal(self, user_id: str, text: str, subject: str = "") -> WriteResult:
+    def store_personal(self, user_id: str, text: str, subject: str = "",
+                        source_tool: str = "chat_parser") -> WriteResult:
         db = self._db(Scope.PRIVATE, user_id=user_id)
+        normalizer = self._get_normalizer(user_id)
+
+        # Learn name aliases from text (e.g., "My name is Alice")
+        normalizer.learn_from_text(text)
+
+        # Grammar-based extraction (primary for sentence-like text)
         mems = extract_personal(text, user_id, subject, extractor=self._extractor)
-        return self._store(db, mems, cross_scope_dbs=[])
 
-    def store_chat(self, user_id: str, text: str, speaker: str = "", session_id: str = "") -> WriteResult:
+        # Grammar-free extraction only for non-sentence formats
+        # Avoids double-extraction and uncapped objects on normal sentences
+        from lore_memory.extraction_gf import detect_source_type
+        st = detect_source_type(text)
+        if st.type != "sentence":
+            gf_mems = self._gf_extractor.extract(
+                text, user_id, source_tool=source_tool,
+                scope="private", context="personal", subject=subject or user_id)
+            mems.extend(gf_mems)
+
+        return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
+                          source_tool=source_tool)
+
+    def store_chat(self, user_id: str, text: str, speaker: str = "",
+                    session_id: str = "", source_tool: str = "chat_parser") -> WriteResult:
         db = self._db(Scope.PRIVATE, user_id=user_id)
+        normalizer = self._get_normalizer(user_id)
+        normalizer.learn_from_text(text)
         mems = extract_chat(text, user_id, speaker, session_id, extractor=self._extractor)
-        return self._store(db, mems, cross_scope_dbs=[])
+        return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
+                          source_tool=source_tool)
 
-    def store_company(self, user_id: str, org_id: str, text: str, subject: str = "") -> WriteResult:
+    def store_company(self, user_id: str, org_id: str, text: str, subject: str = "",
+                       source_tool: str = "company_parser") -> WriteResult:
         db = self._db(Scope.SHARED, org_id=org_id)
         mems = extract_company(text, user_id, org_id, subject, extractor=self._extractor)
         private_db = self._db(Scope.PRIVATE, user_id=user_id)
-        return self._store(db, mems, cross_scope_dbs=[private_db])
+        return self._store(db, mems, cross_scope_dbs=[private_db], user_id=user_id,
+                          source_tool=source_tool)
 
     _VALID_SCOPE_CONTEXT = {
         ("private", "personal"), ("private", "chat"),
@@ -162,7 +219,8 @@ class Engine:
                    object_value: str, user_id: str = "", org_id: str = "",
                    repo_id_val: str = "", confidence: float = 0.7,
                    source_text: str = "", is_negation: bool = False,
-                   source_type: str = "user_stated", metadata: dict | None = None) -> WriteResult:
+                   source_type: str = "user_stated", metadata: dict | None = None,
+                   source_tool: str = "direct") -> WriteResult:
         sc = Scope(scope)
         if (scope, context) not in self._VALID_SCOPE_CONTEXT:
             raise ValueError(f"Invalid scope/context combination: {scope}/{context}")
@@ -174,14 +232,56 @@ class Engine:
             is_negation=is_negation, source_type=source_type,
             confidence=confidence, metadata=metadata or {},
         )
-        return self._store(db, [mem], cross_scope_dbs=[])
+        return self._store(db, [mem], cross_scope_dbs=[], user_id=user_id,
+                          source_tool=source_tool)
 
     def ingest_repo(self, user_id: str, repo_path: str | Path, commit_limit: int = 50) -> WriteResult:
         rid = repo_id(repo_path)
         db = self._db(Scope.REPO, repo_id=rid)
         mems = commits_to_memories(recent_commits(repo_path, commit_limit), rid)
         mems += tree_to_memories(file_tree(repo_path), rid)
-        return self._store(db, mems, cross_scope_dbs=[])
+        return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
+                          source_tool="repo_parser")
+
+    def store_from_tool(self, user_id: str, text: str,
+                         source_tool: str, **kwargs) -> WriteResult:
+        """Store facts from any tool. Uses grammar-free extraction and
+        full normalization + dedup pipeline.
+
+        This is the preferred entry point for multi-tool integrations.
+        """
+        db = self._db(Scope.PRIVATE, user_id=user_id)
+        normalizer = self._get_normalizer(user_id)
+        normalizer.learn_from_text(text)
+
+        # Grammar-free extraction (handles any text format)
+        mems = self._gf_extractor.extract(
+            text, user_id, source_tool=source_tool,
+            scope="private", context="personal",
+            subject=kwargs.get("subject", user_id))
+
+        # Also run grammar-based extraction for sentence-like text
+        grammar_mems = extract_personal(text, user_id,
+                                        kwargs.get("subject", ""),
+                                        extractor=self._extractor)
+        mems.extend(grammar_mems)
+
+        return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
+                          source_tool=source_tool)
+
+    def get_provenance(self, fact_id: str) -> list:
+        """Get provenance records for a fact."""
+        return self._provenance.get_provenance(fact_id)
+
+    def normalization_stats(self, user_id: str) -> dict:
+        """Get normalization statistics for a user."""
+        normalizer = self._get_normalizer(user_id)
+        return normalizer.stats()
+
+    def dedup_stats(self, user_id: str) -> dict:
+        """Get deduplication statistics for a user."""
+        dedup = self._get_dedup(user_id)
+        return dedup.stats.to_dict()
 
     # --- Read API ---
 
@@ -374,14 +474,64 @@ class Engine:
 
     # --- Internal ---
 
-    def _store(self, db: MemoryDB, mems: list[Memory], cross_scope_dbs: list[MemoryDB]) -> WriteResult:
+    def _store(self, db: MemoryDB, mems: list[Memory],
+               cross_scope_dbs: list[MemoryDB],
+               user_id: str = "", source_tool: str = "") -> WriteResult:
         result = WriteResult()
+        normalizer = self._get_normalizer(user_id) if user_id else None
+        dedup = self._get_dedup(user_id) if user_id else None
+
         for mem in mems:
+            # --- Normalization ---
+            # Preserve original surface forms for provenance
+            orig_subject = mem.subject
+            orig_predicate = mem.predicate
+            orig_object = mem.object_value
+
+            if normalizer and mem.predicate != "stated":
+                canon_s, canon_p, canon_o = normalizer.normalize_triple(
+                    mem.subject, mem.predicate, mem.object_value)
+                # Normalize subject and object at write time
+                mem.subject = canon_s
+                mem.object_value = canon_o
+                # Predicate: register in normalizer for clustering but keep
+                # the grammar-extracted form for backward compatibility.
+                # The dedup engine and belief system handle predicate aliases
+                # via their own canon() at comparison time.
+
             if not mem.embedding:
                 mem.embedding = self._embed(mem.triplet_text)
+
+            # --- Advanced dedup check ---
+            if dedup and mem.predicate != "stated":
+                dedup_result = dedup.check(mem, db, embed_fn=self._embed)
+                if dedup_result.is_duplicate:
+                    if dedup_result.action == "reject":
+                        result.deduplicated += 1
+                        # Record provenance even for rejected duplicates
+                        self._provenance.record(
+                            dedup_result.existing_id, source_tool,
+                            orig_subject, orig_predicate, orig_object,
+                            mem.source_text)
+                        continue
+                    elif dedup_result.action == "merge":
+                        result.deduplicated += 1
+                        # Boost evidence on existing fact
+                        db.record_feedback(dedup_result.existing_id, helpful=True)
+                        self._provenance.record(
+                            dedup_result.existing_id, source_tool,
+                            orig_subject, orig_predicate, orig_object,
+                            mem.source_text)
+                        continue
+                    elif dedup_result.action == "supersede":
+                        # Mark old as superseded, store new
+                        db.update_state(dedup_result.existing_id, "superseded")
+                        self._provenance.mark_superseded(
+                            dedup_result.existing_id, mem.id)
+                        result.contradictions += 1
+
             # Skip contradiction checks for "stated" predicate — raw text
             # memories are never single-valued and never contradict each other.
-            # This avoids O(n) subject queries for every text memory.
             if mem.predicate != "stated":
                 contradicted = check_contradictions(db, mem)
                 result.contradictions += len(contradicted)
@@ -389,11 +539,20 @@ class Engine:
                     cross = check_cross_scope_contradictions(
                         cross_scope_dbs, mem.subject, mem.predicate, mem.object_value)
                     result.contradictions += len(cross)
+
             dup = db.put(mem)
             if dup:
                 result.deduplicated += 1
+                # Record provenance for duplicate
+                self._provenance.record(
+                    dup, source_tool, orig_subject, orig_predicate,
+                    orig_object, mem.source_text)
             else:
                 result.created += 1
+                # Record provenance for new fact
+                self._provenance.record(
+                    mem.id, source_tool, orig_subject, orig_predicate,
+                    orig_object, mem.source_text)
                 # Incrementally add edge to graph (O(1), no full rebuild)
                 if mem.subject and mem.object_value:
                     self._graph.add_edge(mem.subject, mem.object_value)

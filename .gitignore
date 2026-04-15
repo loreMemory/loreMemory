@@ -53,3 +53,6 @@ lore_data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Working docs
+Spo_deep_optimize.md

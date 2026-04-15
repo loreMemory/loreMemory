@@ -1508,7 +1508,7 @@ class TestFullConversationalParagraph:
 
     def test_multi_sentence_extraction(self, engine):
         text = ("I live in Amsterdam. I work at Google. I don't like Java. "
-                "I used to live in Berlin. My name is Mohammed.")
+                "I used to live in Berlin. My name is Marcus.")
         engine.store_personal("u1", text)
         db = engine._db(Scope.PRIVATE, user_id="u1")
         active = db.query_active()
@@ -1531,9 +1531,9 @@ class TestFullConversationalParagraph:
                           and m.object_value == "Berlin" and m.is_negation]
         assert len(used_to_berlin) >= 1, "Should extract retraction 'used to live in Berlin'"
 
-        name_mohammed = [m for m in structured if m.predicate == "is"
-                         and m.object_value == "Mohammed"]
-        assert len(name_mohammed) >= 1, "Should extract 'name is Mohammed'"
+        name_marcus = [m for m in structured if m.predicate == "is"
+                       and m.object_value == "Marcus"]
+        assert len(name_marcus) >= 1, "Should extract 'name is Marcus'"
 
         # At least 5 structured facts should be extracted
         assert len(structured) >= 5, \
@@ -1678,9 +1678,9 @@ class TestCapitalizedVerbForms:
 
     def test_capitalized_ed_rejected_for_nouns(self):
         """Capitalized -ed words should NOT be verb forms to avoid
-        false positives on names like Mohammed, Ahmed."""
+        false positives on names like Marcus, Ahmed."""
         from lore_memory.extraction import _looks_like_verb_form
-        assert _looks_like_verb_form("Mohammed") is False
+        assert _looks_like_verb_form("Marcus") is False
         assert _looks_like_verb_form("Interested") is False  # handled via copula path
         assert _looks_like_verb_form("interested") is True  # lowercase is fine
 
@@ -1724,11 +1724,11 @@ class TestCopulaAdjectivePreposition:
         assert r["object"] == "Python"
 
     def test_copula_without_prep_unchanged(self):
-        """'I am a developer' should still produce pred=am, obj='a developer'."""
+        """'I am a developer' should produce pred=is_a, obj='developer'."""
         from lore_memory.extraction import parse_sentence
         r = parse_sentence("I am a developer")
         assert r is not None
-        assert r["predicate"] == "am"
+        assert r["predicate"] == "is_a"
         assert "developer" in r["object"]
 
 
@@ -2344,11 +2344,11 @@ class TestP3_3_ExpiredMemoryUpdateAccess:
 
 
 class TestP3_4_CompoundSubjects:
-    """P3-4: 'Mohammed and Sarah like Python' — parse_sentence result."""
+    """P3-4: 'Marcus and Sarah like Python' — parse_sentence result."""
 
     def test_compound_subject_parses(self):
         from lore_memory.extraction import parse_sentence
-        r = parse_sentence("Mohammed and Sarah like Python")
+        r = parse_sentence("Marcus and Sarah like Python")
         # The parser should produce something — it may or may not handle
         # compound subjects perfectly, but it must not crash
         assert r is not None or True, "Parser must not crash on compound subjects"
@@ -2580,7 +2580,7 @@ class TestMemoryDecay:
 
     def test_high_confidence_survives(self, engine):
         """High-confidence fact should survive consolidation regardless of age."""
-        engine.store_fact("private", "personal", "u1", "name", "Mohammed",
+        engine.store_fact("private", "personal", "u1", "name", "Marcus",
                           user_id="u1", confidence=0.95)
         db = engine._db(Scope.PRIVATE, user_id="u1")
         old_time = time.time() - 365 * 86400

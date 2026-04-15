@@ -124,7 +124,7 @@ def bench_decay():
     # Create facts with varying confidence and age
     cases = [
         # (predicate, value, confidence, days_old, should_survive)
-        ("name", "Mohammed", 0.95, 365, True),        # high conf, old — survives
+        ("name", "Marcus", 0.95, 365, True),          # high conf, old — survives
         ("temp_project", "old_thing", 0.05, 90, False), # low conf, old — archived
         ("likes", "Python", 0.8, 180, True),            # medium conf, old — survives
         ("temp_note", "forget_me", 0.03, 60, False),    # very low conf — archived

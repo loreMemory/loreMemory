@@ -116,7 +116,7 @@ def scenario_01(tmp_dir):
     m = make_memory(tmp_dir, "onboard_user")
     try:
         store_all(m, [
-            "hi, my name is Mohammed",
+            "hi, my name is Marcus",
             "i'm a software engineer",
             "i work at a startup in Dubai",
             "we're building an AI memory tool called Lore",
@@ -127,7 +127,7 @@ def scenario_01(tmp_dir):
         ])
 
         res = m.query("what is my name?")
-        r.check("name -> Mohammed", query_contains(res, "mohammed"),
+        r.check("name -> Marcus", query_contains(res, "marcus"),
                 f"got {len(res)} results")
 
         res = m.query("what is my job?")
@@ -541,7 +541,7 @@ def scenario_08(tmp_dir):
             "super into the whole agent space tbh",
             "we use sqlite lol dont judge",
             "gonna switch to postgres eventually",
-            "my cofounder is also called mohammed which is confusing",
+            "my cofounder is also called marcus which is confusing",
             "we met at a hackathon like 3 years ago",
             "raised some money recently, cant say how much yet",
             "launching soon hopefully",

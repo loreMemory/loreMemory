@@ -239,7 +239,7 @@ def _looks_like_verb_form(word: str) -> bool:
     Capitalized words are accepted as verb forms ONLY for unambiguous
     endings like -ing (Working, Developing). For -ed/-en endings,
     capitalized words are rejected to avoid false positives on proper
-    nouns (Mohammed, Ahmed, Alfred).
+    nouns (Marcus, Ahmed, Alfred).
     """
     w = word.lower()
     if w in _AUXILIARIES:
@@ -252,7 +252,7 @@ def _looks_like_verb_form(word: str) -> bool:
     if w.endswith("ing") and len(w) >= 5:
         return True
     # -ed and -en: reject capitalized words to avoid false positives
-    # on proper nouns (Mohammed, Ahmed, Alfred, hundred)
+    # on proper nouns (Marcus, Ahmed, Alfred, hundred)
     if word[0].isupper():
         return False
     if w.endswith("ed") and len(w) >= 5:
@@ -450,6 +450,16 @@ def parse_sentence(sentence: str) -> dict | None:
     3. Preposition = word immediately after verb if it's a known preposition
     4. Object = everything after verb+preposition, up to clause boundary
     """
+    # Expand contractions before parsing
+    sentence = re.sub(r"\bI'm\b", "I am", sentence, flags=re.IGNORECASE)
+    sentence = re.sub(r"\bI've\b", "I have", sentence, flags=re.IGNORECASE)
+    sentence = re.sub(r"\bI'll\b", "I will", sentence, flags=re.IGNORECASE)
+    sentence = re.sub(r"\bI'd\b", "I would", sentence, flags=re.IGNORECASE)
+    sentence = re.sub(r"\b(\w+)'re\b", r"\1 are", sentence)
+    sentence = re.sub(r"\b(\w+)'s\b(?!\s+\w+ing)", r"\1 is", sentence)  # "he's" but not possessive before gerund
+    sentence = re.sub(r"\b(\w+)'ve\b", r"\1 have", sentence)
+    sentence = re.sub(r"\b(\w+)'ll\b", r"\1 will", sentence)
+
     words = sentence.split()
     if len(words) < 2:
         return None
@@ -491,7 +501,7 @@ def parse_sentence(sentence: str) -> dict | None:
         # Skip determiners, verb forms (Decided, Started, Working)
         if i == 0 and words[i][0].isupper() and tok not in _FILLERS and tok not in _DETERMINERS:
             # Check if this is actually a verb at sentence start (implicit subject)
-            # "Decided to use X" → verb. "Mohammed lives in X" → proper noun.
+            # "Decided to use X" → verb. "Marcus lives in X" → proper noun.
             # For -ed words: only verb if followed by preposition/to (confirms verb phrase)
             next_tok = tokens[i + 1] if i + 1 < len(tokens) else ""
             is_verb_at_start = (
@@ -679,6 +689,16 @@ def parse_sentence(sentence: str) -> dict | None:
     else:
         predicate = _norm(lemma)
 
+    # Normalize copula + "a/an" to "is_a" (identity predicate)
+    # "I am a software engineer" → predicate=is_a, object="software engineer"
+    if predicate in ("am", "is", "be") and obj_tokens:
+        first_obj = obj_tokens[0].lower().strip(".,!?;:\"'")
+        if first_obj in ("a", "an"):
+            predicate = "is_a"
+            obj = " ".join(obj_tokens[1:]).strip(".,!?;:\"'")
+            if not obj:
+                obj = " ".join(obj_tokens).strip(".,!?;:\"'")
+
     # Build subject text
     subj_text = " ".join(words[:subj_end]).strip(".,!?;:\"'")
 
@@ -750,8 +770,8 @@ def extract_personal(text: str, user_id: str, subject: str = "",
 
         mems.append(Memory(
             scope="private", context="personal", user_id=user_id,
-            subject=mem_subject, predicate=pred, object_value=obj,
-            source_text=sentence, is_negation=parsed["is_negation"],
+            subject=mem_subject, predicate=pred, object_value=obj[:500],
+            source_text=sentence[:500], is_negation=parsed["is_negation"],
             source_type="user_stated", confidence=conf,
             valid_until=parsed.get("valid_until"),
             created_at=now, updated_at=now, last_accessed=now,
@@ -801,8 +821,8 @@ def extract_chat(text: str, user_id: str, speaker: str = "",
         mems.append(Memory(
             scope="private", context="chat", user_id=user_id,
             subject=mem_subject, predicate=parsed["predicate"],
-            object_value=parsed["object"],
-            source_text=sentence, is_negation=parsed["is_negation"],
+            object_value=parsed["object"][:500],
+            source_text=sentence[:500], is_negation=parsed["is_negation"],
             source_type="user_stated", confidence=0.75,
             created_at=now, updated_at=now, last_accessed=now,
             metadata=meta,
@@ -869,8 +889,8 @@ def extract_company(text: str, user_id: str, org_id: str,
         mems.append(Memory(
             scope="shared", context="company", user_id=user_id, org_id=org_id,
             subject=subj, predicate=parsed["predicate"],
-            object_value=parsed["object"],
-            source_text=sentence, source_type="user_stated", confidence=0.75,
+            object_value=parsed["object"][:500],
+            source_text=sentence[:500], source_type="user_stated", confidence=0.75,
             created_at=now, updated_at=now, last_accessed=now,
             metadata=meta,
         ))
