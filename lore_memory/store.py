@@ -331,6 +331,40 @@ class MemoryDB:
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
 
+    def query_superseded(self, subject: str | None = None, limit: int = 50) -> list[Memory]:
+        """Query superseded memories (facts that were replaced by newer ones).
+        Used for temporal queries like 'where did X live before?'."""
+        with self._lock:
+            if subject:
+                rows = self.conn.execute(
+                    "SELECT * FROM memories WHERE state='superseded' AND subject=? ORDER BY updated_at DESC LIMIT ?",
+                    (subject, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM memories WHERE state='superseded' ORDER BY updated_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [self._to_mem(r) for r in rows]
+
+    def fts_search_all_states(self, query: str, limit: int = 50) -> list[Memory]:
+        """FTS search across all states (active, superseded, archived).
+        Used for temporal queries that need to find past facts."""
+        with self._lock:
+            if not self._has_fts or not query.strip():
+                return []
+            try:
+                rows = self.conn.execute(
+                    """SELECT m.* FROM memories_fts f
+                       JOIN memories m ON f.id = m.id
+                       WHERE memories_fts MATCH ? AND m.state IN ('active', 'superseded')
+                       LIMIT ?""",
+                    (query, limit),
+                ).fetchall()
+                return [self._to_mem(r) for r in rows]
+            except sqlite3.OperationalError:
+                return []
+
     # --- Update ---
 
     def update_access(self, mem_id: str) -> None:

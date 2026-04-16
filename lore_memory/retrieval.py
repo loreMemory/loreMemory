@@ -160,6 +160,16 @@ class Retriever:
         w = self.get_weights(weight_key)
         results: list[SearchResult] = []
 
+        # Detect temporal intent: semantic prototype + keyword fallback
+        self._ensure_intents()
+        q_lower = query.lower()
+        _temp_sim = cosine_sim(q_emb, self._intent_protos["temporal"])
+        _TEMPORAL_KEYWORDS = {"before", "previous", "previously", "formerly",
+                              "used to", "earlier", "prior", "ago", "past",
+                              "old", "former", "history"}
+        is_temporal_query = (_temp_sim > 0.25
+                             or any(kw in q_lower for kw in _TEMPORAL_KEYWORDS))
+
         for db, scope_label in dbs:
             seen_ids: set[str] = set()
             cands: list[Memory] = []
@@ -173,21 +183,32 @@ class Retriever:
                 fts_parts = [f"{t}*" for t in safe_terms if len(t) >= 2]
                 fts_query = " OR ".join(fts_parts) if fts_parts else ""
                 try:
-                    fts_hits = db.fts_search(fts_query, limit=top_k * 5) if fts_query else []
+                    # For temporal queries, search all states (active + superseded)
+                    if is_temporal_query and fts_query:
+                        fts_hits = db.fts_search_all_states(fts_query, limit=top_k * 5)
+                    else:
+                        fts_hits = db.fts_search(fts_query, limit=top_k * 5) if fts_query else []
                 except Exception:
                     fts_hits = []
                 for m in fts_hits:
-                    if m.is_active:
+                    if m.is_active or (is_temporal_query and m.state == "superseded"):
                         cands.append(m)
                         seen_ids.add(m.id)
 
             # Secondary: vector similarity search (finds semantic matches FTS misses)
-            # "pets" → "cat", "exercise" → "run", "live" → "based in"
             vec_hits = db.vector_search(q_emb, top_k=top_k, context=context)
             for m, sim in vec_hits:
                 if m.id not in seen_ids and m.is_active:
                     cands.append(m)
                     seen_ids.add(m.id)
+
+            # For temporal queries, also pull superseded facts
+            if is_temporal_query:
+                superseded = db.query_superseded(limit=top_k)
+                for m in superseded:
+                    if m.id not in seen_ids:
+                        cands.append(m)
+                        seen_ids.add(m.id)
 
             # Tertiary: small recency sample if still short
             if len(cands) < top_k:
@@ -287,9 +308,16 @@ class Retriever:
 
                 # Structured SPO bonus: prefer extracted triples over raw text
                 if m.predicate == "stated":
-                    rrf *= 0.6  # raw text is fallback, not primary
+                    rrf *= 0.7  # raw text is fallback, not primary
                 else:
                     rrf *= 1.3  # structured facts are preferred
+
+                # Superseded facts get a penalty unless temporal query
+                if m.state == "superseded":
+                    if is_temporal_query:
+                        rrf *= 1.5  # boost superseded for temporal queries
+                    else:
+                        rrf *= 0.1  # heavily penalize for non-temporal
 
                 # Subject alignment: boost relationship matches, penalize mismatches
                 sa = self._subject_alignment(query, m)
@@ -583,27 +611,30 @@ class Retriever:
     def _temporal_query_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
         """Boost retracted/older facts when query asks about the past.
 
-        Uses semantic similarity to a precomputed temporal prototype.
-        Penalizes current-state predicates via keyword check (no extra embeds).
+        Uses semantic similarity + keyword fallback to detect temporal intent.
         """
         self._ensure_intents()
         q_emb = self.embed(query)
+        q_lower = query.lower()
         temp_sim = cosine_sim(q_emb, self._intent_protos["temporal"])
+        _TEMPORAL_KW = {"before", "previous", "previously", "formerly",
+                        "used to", "earlier", "prior", "ago", "past"}
+        has_kw = any(kw in q_lower for kw in _TEMPORAL_KW)
 
-        if temp_sim < 0.35:
+        if temp_sim < 0.2 and not has_kw:
             return {}
 
-        strength = min(2.5, (temp_sim - 0.25) * 5)
+        strength = max(1.5, min(2.5, (temp_sim - 0.1) * 5)) if has_kw else max(0.5, min(2.5, (temp_sim - 0.15) * 5))
         _CURRENT_STATE_PREDS = frozenset({
             "live_in", "lives_in", "work_at", "works_at", "move_to",
             "employed_at", "reside_in", "base_in",
         })
         scores: dict[str, float] = {}
         for m in cands:
-            if m.is_negation:
-                scores[m.id] = strength
+            if m.is_negation or m.state == "superseded":
+                scores[m.id] = strength  # boost past/superseded facts
             elif m.state == "active" and m.predicate in _CURRENT_STATE_PREDS:
-                scores[m.id] = scores.get(m.id, 0) - 0.5
+                scores[m.id] = scores.get(m.id, 0) - 0.6  # penalize current state
         return scores
 
     def _ensure_intents(self) -> None:
