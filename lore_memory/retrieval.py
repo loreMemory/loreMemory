@@ -106,6 +106,22 @@ _GENERIC_PREDICATES = frozenset({
     "is_a", "name", "am", "is", "stated", "be",
 })
 
+# Query synonym expansion: broaden FTS recall for near-synonyms
+_QUERY_SYNONYMS = {
+    "fiancee": ["girlfriend", "boyfriend", "partner", "engaged", "fiance"],
+    "fiance": ["girlfriend", "boyfriend", "partner", "engaged", "fiancee"],
+    "wife": ["married", "spouse", "partner", "husband"],
+    "husband": ["married", "spouse", "partner", "wife"],
+    "car": ["drive", "vehicle", "motorcycle", "bmw", "tesla"],
+    "vehicle": ["drive", "car", "motorcycle"],
+    "phone": ["iphone", "pixel", "samsung", "mobile"],
+    "laptop": ["macbook", "thinkpad", "computer"],
+    "drink": ["coffee", "tea", "matcha", "alcohol", "water"],
+    "salary": ["pay", "compensation", "income", "earn"],
+    "left": ["leaving", "departed", "quit", "resigned"],
+    "departed": ["left", "leaving", "quit"],
+}
+
 
 class Retriever:
     def __init__(self, embed_fn) -> None:
@@ -157,6 +173,13 @@ class Retriever:
         now = time.time()
         q_emb = self.embed(query)
         q_terms = tokenize(query)
+
+        # Expand query terms with synonyms for broader FTS recall
+        expanded_terms = list(q_terms)
+        for term in q_terms:
+            if term in _QUERY_SYNONYMS:
+                expanded_terms.extend(_QUERY_SYNONYMS[term])
+
         w = self.get_weights(weight_key)
         results: list[SearchResult] = []
 
@@ -170,6 +193,14 @@ class Retriever:
         is_temporal_query = (_temp_sim > 0.25
                              or any(kw in q_lower for kw in _TEMPORAL_KEYWORDS))
 
+        # Scope alignment: boost shared scope for company/team queries
+        _COMPANY_KEYWORDS = {"company", "team", "org", "organization", "startup",
+                             "we", "our", "engineers", "employees", "cto",
+                             "mission", "deploy", "infrastructure", "stack",
+                             "process", "methodology", "market", "product",
+                             "payflow", "revenue", "volume"}
+        is_company_query = any(kw in q_lower for kw in _COMPANY_KEYWORDS)
+
         for db, scope_label in dbs:
             seen_ids: set[str] = set()
             cands: list[Memory] = []
@@ -178,7 +209,7 @@ class Retriever:
             if q_terms:
                 safe_terms = [t.replace('"', '').replace("'", "").replace("*", "")
                               .replace(":", "").replace("(", "").replace(")", "")
-                              for t in q_terms if t.replace('"', '').strip()]
+                              for t in expanded_terms if t.replace('"', '').strip()]
                 # Use prefix matching (term*) so "auth" matches "authentication"
                 fts_parts = [f"{t}*" for t in safe_terms if len(t) >= 2]
                 fts_query = " OR ".join(fts_parts) if fts_parts else ""
@@ -308,7 +339,7 @@ class Retriever:
 
                 # Structured SPO bonus: prefer extracted triples over raw text
                 if m.predicate == "stated":
-                    rrf *= 0.7  # raw text is fallback, not primary
+                    rrf *= 0.75  # raw text is fallback, not primary
                 else:
                     rrf *= 1.3  # structured facts are preferred
 
@@ -335,6 +366,10 @@ class Retriever:
                 eb = entity_scores.get(m.id, 0.0)
                 if eb > 0:
                     rrf *= (1.0 + eb)
+
+                # Scope alignment: boost shared scope for company/team queries
+                if is_company_query and "shared" in scope_label:
+                    rrf *= 1.8
 
                 if rrf > 0:
                     results.append(SearchResult(

@@ -520,6 +520,13 @@ def parse_sentence(sentence: str) -> dict | None:
     3. Preposition = word immediately after verb if it's a known preposition
     4. Object = everything after verb+preposition, up to clause boundary
     """
+    # Strip leading filler + conjunction combos: "oh and", "yeah but", "so like"
+    sentence = re.sub(
+        r'^(?:(?:oh|well|yeah|yep|so|ok|okay|hey|lol|haha|hmm|wow|nah)\s+(?:and|but|so)\s+)+',
+        '', sentence, flags=re.IGNORECASE).strip()
+    if not sentence:
+        return None
+
     # Expand contractions before parsing
     sentence = re.sub(r"\bI'm\b", "I am", sentence, flags=re.IGNORECASE)
     sentence = re.sub(r"\bI've\b", "I have", sentence, flags=re.IGNORECASE)
@@ -888,6 +895,104 @@ class Extractor(Protocol):
 
 
 # ---------------------------------------------------------------------------
+#  Compound object splitting
+# ---------------------------------------------------------------------------
+
+def _split_compound_object(predicate: str, object_value: str,
+                           source_text: str = "") -> list[str]:
+    """Split compound objects like 'Python, Go, PostgreSQL, and Kubernetes'
+    into individual items. Returns empty list if not compound.
+
+    Falls back to source_text when the parsed object has been stripped of
+    commas/conjunctions by the grammar parser.
+    """
+    # Only split for multi-valued predicates (use, like, speak, etc.)
+    # Don't split single-valued predicates (live_in, work_at)
+    _SPLITTABLE_PREDS = {"use", "speak", "know", "like", "love", "enjoy",
+                         "prefer", "learn", "study", "code_in", "write",
+                         "hate", "dislike", "is", "have", "want"}
+    if predicate not in _SPLITTABLE_PREDS and not predicate.startswith("is"):
+        return []
+
+    # Try the object_value first, then fall back to source_text
+    # The parser may strip commas, so source_text preserves the original
+    for text_to_split in [object_value, source_text]:
+        obj = text_to_split.strip()
+        if not obj:
+            continue
+        # "X, Y, and Z" or "X, Y, Z" or "X and Y"
+        if ", " not in obj and " and " not in obj:
+            continue
+
+        # Split on comma and "and"
+        parts = re.split(r',\s*(?:and\s+)?|\s+and\s+', obj)
+        parts = [p.strip().strip(".,") for p in parts if p.strip()]
+
+        # Only split if we get 2+ meaningful items
+        if len(parts) < 2:
+            continue
+        # Filter out very short items, "some" qualifiers, and sentence
+        # prefixes that leak in from source_text (e.g. "I use", "Our stack is")
+        _SKIP = {"some", "a", "few", "i", "we", "our", "the", "my"}
+        parts = [p for p in parts if len(p) > 1 and p.lower() not in _SKIP]
+        # When splitting source_text, the first "part" may include the
+        # subject+verb prefix. Only keep parts that look like individual
+        # items (no verb forms, short-ish).
+        if text_to_split is source_text and parts:
+            # Remove the first part if it contains a verb (it's likely the
+            # sentence prefix rather than a list item).
+            first_words = parts[0].lower().split()
+            _VERBS_IN_PREFIX = {"use", "like", "know", "speak", "enjoy",
+                                "love", "prefer", "learn", "study", "write",
+                                "hate", "is", "are", "have", "has", "want"}
+            if any(w in _VERBS_IN_PREFIX for w in first_words):
+                parts = parts[1:]
+        if len(parts) >= 2:
+            return parts
+
+    # Fallback: space-separated capitalized words (parser stripped commas)
+    obj = object_value.strip()
+    words = obj.split()
+    if len(words) >= 2 and all(w[0].isupper() for w in words if w):
+        return words if len(words) >= 2 else []
+
+    return []
+
+
+# ---------------------------------------------------------------------------
+#  Numeric fact extraction
+# ---------------------------------------------------------------------------
+
+def _extract_numeric_facts(text: str, user_id: str, subject: str,
+                           now: float, scope: str = "private",
+                           context: str = "personal",
+                           org_id: str | None = None) -> list[Memory]:
+    """Extract numeric facts like '$100M', '80 engineers', '10k TPS'."""
+    mems: list[Memory] = []
+    # Pattern: number + unit/context
+    patterns = [
+        (r'\$[\d,.]+[BMKbmk]?\b', "amount"),  # $100M, $5K
+        (r'\b(\d+[kKmMbB]?)\s+(engineers?|employees?|people|members?)', "team_size"),
+        (r'\b(\d+[kKmMbB]?)\s+(?:TPS|tps|transactions?\s+per\s+second)', "throughput"),
+        (r'\b(\d+)\s*(?:ms|milliseconds?)\b', "latency"),
+        (r'\b(\d+)\s*(?:years?|months?|weeks?)\b', "duration"),
+    ]
+    for pat, pred in patterns:
+        for m in re.finditer(pat, text):
+            value = m.group(0).strip()
+            kwargs: dict = dict(
+                scope=scope, context=context, user_id=user_id,
+                subject=subject, predicate=pred, object_value=value,
+                source_text=text[:500], source_type="user_stated",
+                confidence=0.7, created_at=now, updated_at=now, last_accessed=now,
+            )
+            if org_id is not None:
+                kwargs["org_id"] = org_id
+            mems.append(Memory(**kwargs))
+    return mems
+
+
+# ---------------------------------------------------------------------------
 #  Public API
 # ---------------------------------------------------------------------------
 
@@ -969,6 +1074,25 @@ def extract_personal(text: str, user_id: str, subject: str = "",
             created_at=now, updated_at=now, last_accessed=now,
         ))
 
+        # Split compound objects into individual facts
+        items = _split_compound_object(pred, obj, source_text=sentence)
+        if items:
+            for item in items:
+                item_key = (pred, item.lower())
+                if item_key not in seen:
+                    seen.add(item_key)
+                    mems.append(Memory(
+                        scope="private", context="personal", user_id=user_id,
+                        subject=mem_subject, predicate=pred, object_value=item[:500],
+                        source_text=sentence[:500], is_negation=parsed["is_negation"],
+                        source_type="user_stated", confidence=conf * 0.9,
+                        created_at=now, updated_at=now, last_accessed=now,
+                    ))
+
+    # Layer 2b: Numeric fact extraction
+    mems.extend(_extract_numeric_facts(text, user_id, subject, now,
+                                       scope="private", context="personal"))
+
     # Layer 3: Optional plugin extractor
     if extractor:
         mems.extend(extractor(text, user_id, subject=subject,
@@ -1011,15 +1135,36 @@ def extract_chat(text: str, user_id: str, speaker: str = "",
         else:
             mem_subject = parsed["subject"]
 
+        pred_chat = parsed["predicate"]
+        obj_chat = parsed["object"]
+
         mems.append(Memory(
             scope="private", context="chat", user_id=user_id,
-            subject=mem_subject, predicate=parsed["predicate"],
-            object_value=parsed["object"][:500],
+            subject=mem_subject, predicate=pred_chat,
+            object_value=obj_chat[:500],
             source_text=sentence[:500], is_negation=parsed["is_negation"],
             source_type="user_stated", confidence=0.75,
             created_at=now, updated_at=now, last_accessed=now,
             metadata=meta,
         ))
+
+        # Split compound objects into individual facts
+        items_chat = _split_compound_object(pred_chat, obj_chat, source_text=sentence)
+        if items_chat:
+            for item in items_chat:
+                mems.append(Memory(
+                    scope="private", context="chat", user_id=user_id,
+                    subject=mem_subject, predicate=pred_chat,
+                    object_value=item[:500],
+                    source_text=sentence[:500], is_negation=parsed["is_negation"],
+                    source_type="user_stated", confidence=0.75 * 0.9,
+                    created_at=now, updated_at=now, last_accessed=now,
+                    metadata=meta,
+                ))
+
+    # Numeric fact extraction for chat
+    mems.extend(_extract_numeric_facts(text, user_id, speaker, now,
+                                       scope="private", context="chat"))
 
     # Decision detection (keyword-based, not dictionary)
     lower = text.lower()
@@ -1079,14 +1224,36 @@ def extract_company(text: str, user_id: str, org_id: str,
         if subj_lower in ("i", "i'm", "im", "my") or subj_lower.startswith("my "):
             continue
 
+        pred_co = parsed["predicate"]
+        obj_co = parsed["object"]
+
         mems.append(Memory(
             scope="shared", context="company", user_id=user_id, org_id=org_id,
-            subject=subj, predicate=parsed["predicate"],
-            object_value=parsed["object"][:500],
+            subject=subj, predicate=pred_co,
+            object_value=obj_co[:500],
             source_text=sentence[:500], source_type="user_stated", confidence=0.75,
             created_at=now, updated_at=now, last_accessed=now,
             metadata=meta,
         ))
+
+        # Split compound objects into individual facts
+        items_co = _split_compound_object(pred_co, obj_co, source_text=sentence)
+        if items_co:
+            for item in items_co:
+                mems.append(Memory(
+                    scope="shared", context="company", user_id=user_id, org_id=org_id,
+                    subject=subj, predicate=pred_co,
+                    object_value=item[:500],
+                    source_text=sentence[:500], source_type="user_stated",
+                    confidence=0.75 * 0.9,
+                    created_at=now, updated_at=now, last_accessed=now,
+                    metadata=meta,
+                ))
+
+    # Numeric fact extraction for company
+    mems.extend(_extract_numeric_facts(text, user_id, subj, now,
+                                       scope="shared", context="company",
+                                       org_id=org_id))
 
     if extractor:
         mems.extend(extractor(text, user_id, subject=subj,
