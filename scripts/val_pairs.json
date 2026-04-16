@@ -1,0 +1,212 @@
+[
+  {
+    "query": "What doesn't the person like?",
+    "positive": "I don't like pizza",
+    "negative": "I like matcha"
+  },
+  {
+    "query": "What phone does the person have?",
+    "positive": "My phone is a iPad",
+    "negative": "I live in Berlin"
+  },
+  {
+    "query": "Where did the person move to?",
+    "positive": "I moved to Tokyo",
+    "negative": "I have a cat"
+  },
+  {
+    "query": "What was the person's previous job?",
+    "positive": "Before Google, I worked at Stripe",
+    "negative": "I work at Google"
+  },
+  {
+    "query": "Where did the person move to?",
+    "positive": "I moved to Berlin",
+    "negative": "I have a cat"
+  },
+  {
+    "query": "Where does the person live?",
+    "positive": "I live in Portland",
+    "negative": "I work at Google"
+  },
+  {
+    "query": "What is the person's role?",
+    "positive": "I'm the DevOps engineer",
+    "negative": "I like coffee"
+  },
+  {
+    "query": "What does the person do for a living?",
+    "positive": "I work as a CTO",
+    "negative": "I moved from Seattle"
+  },
+  {
+    "query": "What can't the person eat?",
+    "positive": "I'm allergic to shellfish",
+    "negative": "I like sushi"
+  },
+  {
+    "query": "What does the person avoid?",
+    "positive": "I can't stand tea",
+    "negative": "I prefer tea"
+  },
+  {
+    "query": "Where is the person located?",
+    "positive": "I'm currently in Lisbon",
+    "negative": "My birthday is March 15"
+  },
+  {
+    "query": "What programming languages does the person use?",
+    "positive": "I mostly code in TypeScript and Swift",
+    "negative": "I live in Berlin"
+  },
+  {
+    "query": "Does the person have a manager?",
+    "positive": "My manager is Emma",
+    "negative": "I graduated from MIT"
+  },
+  {
+    "query": "What does the person like to drink?",
+    "positive": "I love ramen",
+    "negative": "I work at Google"
+  },
+  {
+    "query": "What is the person's pet's name?",
+    "positive": "My cat is called Mochi",
+    "negative": "My name is Alex"
+  },
+  {
+    "query": "What doesn't the person like?",
+    "positive": "I don't like tacos",
+    "negative": "I like pasta"
+  },
+  {
+    "query": "What is the person's pet's name?",
+    "positive": "My dog is called Max",
+    "negative": "My name is Alex"
+  },
+  {
+    "query": "Who is the CTO?",
+    "positive": "The CTO is Alex",
+    "negative": "I graduated from MIT"
+  },
+  {
+    "query": "What database does the team use?",
+    "positive": "We use Kafka as our main database",
+    "negative": "I like hiking"
+  },
+  {
+    "query": "What did the person study?",
+    "positive": "I studied Mathematics at Berkeley",
+    "negative": "I live in Berlin"
+  },
+  {
+    "query": "What university did the person attend?",
+    "positive": "I went to Berkeley",
+    "negative": "My dog is named Luna"
+  },
+  {
+    "query": "Who is on the person's team?",
+    "positive": "I mentor Tomoko on the Auth team",
+    "negative": "I use Python"
+  },
+  {
+    "query": "What does the person code in?",
+    "positive": "I write Rust for work",
+    "negative": "I have a dog"
+  },
+  {
+    "query": "Where is the person located?",
+    "positive": "I'm currently in Tokyo",
+    "negative": "My birthday is March 15"
+  },
+  {
+    "query": "What database does the team use?",
+    "positive": "We use MongoDB as our main database",
+    "negative": "I like hiking"
+  },
+  {
+    "query": "Where is the person located?",
+    "positive": "I'm currently in London",
+    "negative": "My birthday is March 15"
+  },
+  {
+    "query": "What does the person do for fun?",
+    "positive": "I do hiking on weekends",
+    "negative": "My manager is Sarah"
+  },
+  {
+    "query": "Where did the person work previously?",
+    "positive": "I was at Netflix for 3 years",
+    "negative": "I'm currently at Meta"
+  },
+  {
+    "query": "What does the person like to drink?",
+    "positive": "I love pizza",
+    "negative": "I work at Google"
+  },
+  {
+    "query": "Does the person drink matcha?",
+    "positive": "I don't drink matcha",
+    "negative": "I love matcha"
+  },
+  {
+    "query": "What did the person do before their current role?",
+    "positive": "I was a senior engineer at Netflix",
+    "negative": "I'm a tech lead at Meta"
+  },
+  {
+    "query": "what event streaming do we use?",
+    "positive": "We decided to go with Kafka",
+    "negative": "We use PostgreSQL"
+  },
+  {
+    "query": "what's our monthly volume?",
+    "positive": "Our monthly volume hit $100M",
+    "negative": "We handle 10k TPS"
+  },
+  {
+    "query": "What team is the person on?",
+    "positive": "I'm the tech lead for the Data team",
+    "negative": "I live in Berlin"
+  },
+  {
+    "query": "What university did the person attend?",
+    "positive": "I went to ETH Zurich",
+    "negative": "My dog is named Luna"
+  },
+  {
+    "query": "What programming languages does the person use?",
+    "positive": "I mostly code in Python and TypeScript",
+    "negative": "I live in Berlin"
+  },
+  {
+    "query": "Where is the person employed?",
+    "positive": "I'm employed at Amazon",
+    "negative": "I speak English"
+  },
+  {
+    "query": "What database does the team use?",
+    "positive": "We use Docker as our main database",
+    "negative": "I like hiking"
+  },
+  {
+    "query": "What does the person like to drink?",
+    "positive": "I love tacos",
+    "negative": "I work at Google"
+  },
+  {
+    "query": "Who is the person's spouse?",
+    "positive": "My husband is Diego, works at Shopify",
+    "negative": "I live in Portland"
+  },
+  {
+    "query": "what's my blood type?",
+    "positive": "My blood type is O positive",
+    "negative": "I'm 32 years old"
+  },
+  {
+    "query": "What is the person's job?",
+    "positive": "I am a DevOps engineer at Uber",
+    "negative": "I have a dog named Luna"
+  }
+]

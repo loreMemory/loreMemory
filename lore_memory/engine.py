@@ -136,9 +136,33 @@ class Engine:
         self._purged_paths: set[str] = set()
 
     def _init_embeddings(self):
-        """Auto-detect best available embedding model. No user config needed."""
+        """Auto-detect best available embedding model.
+
+        Priority:
+        1. Fine-tuned lore model (LORE_MODEL_PATH env var or models/ dir)
+        2. Base MiniLM from sentence-transformers
+        3. Hash-based fallback (no ML dependency)
+        """
         try:
+            import os
             from sentence_transformers import SentenceTransformer
+            # Check for fine-tuned model
+            model_path = os.environ.get("LORE_MODEL_PATH", "")
+            if not model_path:
+                # Check common locations
+                candidates = [
+                    os.path.join(os.path.dirname(__file__), "..", "models", "lore-minilm-v1"),
+                    os.path.join(self.config.data_dir, "models", "lore-minilm-v1"),
+                ]
+                for cand in candidates:
+                    if os.path.isdir(cand):
+                        model_path = cand
+                        break
+            if model_path and os.path.isdir(model_path):
+                self._st_model = SentenceTransformer(model_path)
+                self._dims = self._st_model.get_sentence_embedding_dimension()
+                return self._st_embed
+            # Fall back to base model
             self._st_model = SentenceTransformer('all-MiniLM-L6-v2')
             self._dims = 384
             return self._st_embed
