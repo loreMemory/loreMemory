@@ -111,6 +111,8 @@ class Engine:
 
         # Embedding: auto-detect best available, no user config needed
         self._dims = self.config.embedding_dims
+        self._embed_cache: dict[str, list[float]] = {}
+        self._EMBED_CACHE_MAX = 10000
         self._embed = self._init_embeddings()
 
         # Optional extractor — produces structured SPO in addition to raw text
@@ -146,8 +148,18 @@ class Engine:
             return self._hash_embed
 
     def _st_embed(self, text: str) -> list[float]:
-        """Real semantic embeddings via sentence-transformers."""
-        return self._st_model.encode(text).tolist()
+        """Real semantic embeddings via sentence-transformers (with LRU cache)."""
+        key = text[:200]
+        cached = self._embed_cache.get(key)
+        if cached is not None:
+            return cached
+        emb = self._st_model.encode(text).tolist()
+        if len(self._embed_cache) >= self._EMBED_CACHE_MAX:
+            # Evict oldest entry
+            oldest = next(iter(self._embed_cache))
+            del self._embed_cache[oldest]
+        self._embed_cache[key] = emb
+        return emb
 
     def _hash_embed(self, text: str) -> list[float]:
         import struct, math

@@ -527,6 +527,21 @@ def parse_sentence(sentence: str) -> dict | None:
     if not sentence:
         return None
 
+    # Strip correction prefixes — the rest is the corrected fact
+    _CORRECTION_PREFIXES = [
+        "actually no ", "actually, no ", "actually no, ",
+        "wait no ", "wait, no ", "wait no, ",
+        "correction: ", "scratch that, ", "never mind, ",
+        "no wait ", "no wait, ", "sorry, ",
+        "actually, ", "actually ",
+    ]
+    for prefix in _CORRECTION_PREFIXES:
+        if sentence.lower().startswith(prefix):
+            sentence = sentence[len(prefix):].strip()
+            break
+    if not sentence:
+        return None
+
     # Expand contractions before parsing
     sentence = re.sub(r"\bI'm\b", "I am", sentence, flags=re.IGNORECASE)
     sentence = re.sub(r"\bI've\b", "I have", sentence, flags=re.IGNORECASE)

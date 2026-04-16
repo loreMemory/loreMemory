@@ -384,6 +384,7 @@ class Retriever:
         seen_sp: dict[tuple[str, str], SearchResult] = {}
         seen_ids_set: set[str] = set()
         pred_counts: dict[str, int] = {}  # predicate diversity tracking
+        obj_counts: dict[str, int] = {}   # object diversity tracking
         final: list[SearchResult] = []
         for r in results:
             if r.memory.id in seen_ids_set:
@@ -405,6 +406,17 @@ class Retriever:
                     source_scope=r.source_scope,
                 )
             pred_counts[pred] = count + 1
+            # Object diversity: penalize 3rd+ result with the same object_value
+            obj_key = r.memory.object_value.lower().strip()[:50]
+            obj_count = obj_counts.get(obj_key, 0)
+            if obj_count >= 2:
+                r = SearchResult(
+                    memory=r.memory,
+                    score=r.score * 0.3,
+                    channel_scores=r.channel_scores,
+                    source_scope=r.source_scope,
+                )
+            obj_counts[obj_key] = obj_count + 1
             final.append(r)
             if len(final) >= top_k:
                 break
