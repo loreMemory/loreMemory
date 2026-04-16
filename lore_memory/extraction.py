@@ -98,6 +98,66 @@ _FILLERS = frozenset({
     "mostly", "probably", "maybe", "perhaps", "definitely", "certainly",
 })
 
+
+# ---------------------------------------------------------------------------
+#  Trivial / noise message filter
+# ---------------------------------------------------------------------------
+
+def _is_trivial(text: str) -> bool:
+    """Return True if text is trivial chat noise that shouldn't be stored as raw text.
+
+    Filters: greetings, acknowledgements, filler, very short non-informational text.
+    Does NOT filter: short but factual text like "I use Python" or "Berlin. 3 years."
+    """
+    t = text.strip().lower()
+
+    # Too short to be meaningful (under 3 words and no factual content)
+    words = t.split()
+    if len(words) <= 2:
+        # Exception: short but factual ("I'm vegetarian", "Berlin. 3 years.")
+        _FACTUAL_MARKERS = {"i", "my", "we", "our", "i'm", "i've", "im"}
+        if any(w in _FACTUAL_MARKERS for w in words):
+            return False
+        # Check for proper nouns or numbers (likely factual)
+        if any(w[0].isupper() for w in text.strip().split() if w):
+            return False
+        if any(c.isdigit() for c in t):
+            return False
+        return True
+
+    # Known noise patterns
+    _NOISE_STARTS = {
+        "ok", "okay", "sure", "yeah", "yep", "nope", "nah",
+        "lol", "haha", "heh", "lmao", "rofl",
+        "nice", "cool", "great", "thanks", "thank",
+        "brb", "gtg", "ttyl", "bye", "hi", "hey",
+        "happy friday", "happy monday", "good morning", "good night",
+        "sounds good", "looks good", "lgtm",
+        "can someone", "anyone want", "reminder:",
+        "back from", "gonna be ooo",
+    }
+    for noise in _NOISE_STARTS:
+        if t.startswith(noise):
+            # But not if it continues with factual content
+            rest = t[len(noise):].strip()
+            if len(rest.split()) <= 3:
+                return True
+
+    # Very short with no verb-like content
+    if len(words) <= 4:
+        _INFO_VERBS = {"work", "live", "use", "like", "have", "am", "is", "was",
+                       "graduated", "moved", "started", "learned", "built", "speak",
+                       "code", "prefer", "love", "hate", "studying", "reading",
+                       "drink", "eat", "run", "play", "drive"}
+        if not any(w in _INFO_VERBS for w in words):
+            # No informational verb -> likely noise
+            # Exception: contains proper noun or number
+            if not any(w[0].isupper() for w in text.strip().split() if w):
+                if not any(c.isdigit() for c in t):
+                    return True
+
+    return False
+
 # Adverbs that can appear between auxiliary and main verb — skip in verb search
 _ADVERBS = frozenset({
     "currently", "still", "now", "already", "always", "usually",
@@ -842,13 +902,14 @@ def extract_personal(text: str, user_id: str, subject: str = "",
     mems: list[Memory] = []
     seen: set[tuple[str, str]] = set()  # (predicate, object) dedup
 
-    # Layer 1: Raw text memory (always, for FTS)
-    mems.append(Memory(
-        scope="private", context="personal", user_id=user_id,
-        subject=subject, predicate="stated", object_value=text[:500],
-        source_text=text, confidence=0.80, source_type="user_stated",
-        created_at=now, updated_at=now, last_accessed=now,
-    ))
+    # Layer 1: Raw text memory (skip trivial noise)
+    if not _is_trivial(text):
+        mems.append(Memory(
+            scope="private", context="personal", user_id=user_id,
+            subject=subject, predicate="stated", object_value=text[:500],
+            source_text=text, confidence=0.80, source_type="user_stated",
+            created_at=now, updated_at=now, last_accessed=now,
+        ))
 
     # Layer 2: Grammar-based extraction
     for sentence in _split_sentences(text):
@@ -928,14 +989,15 @@ def extract_chat(text: str, user_id: str, speaker: str = "",
     meta = {"session_id": session_id, "speaker": speaker}
     mems: list[Memory] = []
 
-    # Raw text memory
-    mems.append(Memory(
-        scope="private", context="chat", user_id=user_id,
-        subject=speaker, predicate="stated", object_value=text[:500],
-        source_text=text, confidence=0.80, source_type="user_stated",
-        created_at=now, updated_at=now, last_accessed=now,
-        metadata=meta,
-    ))
+    # Raw text memory (skip trivial noise)
+    if not _is_trivial(text):
+        mems.append(Memory(
+            scope="private", context="chat", user_id=user_id,
+            subject=speaker, predicate="stated", object_value=text[:500],
+            source_text=text, confidence=0.80, source_type="user_stated",
+            created_at=now, updated_at=now, last_accessed=now,
+            metadata=meta,
+        ))
 
     # Grammar-based extraction — both first and third person
     for sentence in _split_sentences(text):

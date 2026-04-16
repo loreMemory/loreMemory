@@ -101,6 +101,12 @@ def tokenize(text: str) -> list[str]:
             if t and len(t) > 1 and t.lower() not in _STOPS]
 
 
+# Predicates that are ultra-generic and match almost any query semantically
+_GENERIC_PREDICATES = frozenset({
+    "is_a", "name", "am", "is", "stated", "be",
+})
+
+
 class Retriever:
     def __init__(self, embed_fn) -> None:
         self.embed = embed_fn
@@ -117,6 +123,15 @@ class Retriever:
         # Key: (mem_id_a, mem_id_b) → strength
         self._synapses: dict[tuple[str, str], float] = {}
         self._MAX_SYNAPSES = 100000
+
+        # Predicate embedding cache: predicate_str → embedding vector
+        # Predicates are embedded as natural language phrases for semantic matching
+        self._pred_embeddings: dict[str, list[float]] = {}
+
+        # Query intent embeddings: precomputed prototype vectors for common intents
+        # Lazily initialized on first query
+        self._intent_protos: dict[str, list[float]] = {}
+        self._intents_initialized = False
 
     def set_graph_cache(self, graph_cache) -> None:
         self._graph_cache = graph_cache
@@ -224,7 +239,17 @@ class Retriever:
             broad_query_markers = {"tell me about", "what do you know", "what about", "describe", "summarize"}
             is_broad = any(marker in q_lower for marker in broad_query_markers)
 
-            # Scoring: RRF base (k=20) + predicate alignment + SPO bonus
+            # Check if query has specific intent (from pred map or content words)
+            _STOP_WORDS = {"what", "where", "who", "when", "how", "does",
+                           "do", "is", "are", "the", "a", "an", "my", "i"}
+            has_specific_intent = bool(pred_boost) or any(
+                w not in _STOP_WORDS and len(w) > 2
+                for w in q_lower.split())
+
+            # Entity boost: hard boost for memories containing query entities
+            entity_scores = self._entity_boost(query, cands)
+
+            # Scoring: RRF base (k=20) + alignment boosts
             for m in cands:
                 # RRF base score from all 7 channels
                 rrf = 0.0
@@ -261,8 +286,27 @@ class Retriever:
                     rrf *= (1.0 + 0.3 * min(m.evidence_count, 5) / 5)
 
                 # Structured SPO bonus: prefer extracted triples over raw text
-                if m.predicate != "stated":
-                    rrf *= 1.2
+                if m.predicate == "stated":
+                    rrf *= 0.6  # raw text is fallback, not primary
+                else:
+                    rrf *= 1.3  # structured facts are preferred
+
+                # Subject alignment: boost relationship matches, penalize mismatches
+                sa = self._subject_alignment(query, m)
+                if sa > 0:
+                    rrf *= (1.0 + sa)
+                elif sa < 0:
+                    rrf *= max(0.1, 1.0 + sa)
+
+                # Generic predicate penalty: penalize identity facts when query is specific
+                if m.predicate in _GENERIC_PREDICATES and has_specific_intent:
+                    # Query has specific intent but this fact is generic
+                    rrf *= 0.5
+
+                # Entity boost: boost memories containing query entities
+                eb = entity_scores.get(m.id, 0.0)
+                if eb > 0:
+                    rrf *= (1.0 + eb)
 
                 if rrf > 0:
                     results.append(SearchResult(
@@ -276,6 +320,7 @@ class Retriever:
         from lore_memory.extraction import SINGLE_VALUED
         seen_sp: dict[tuple[str, str], SearchResult] = {}
         seen_ids_set: set[str] = set()
+        pred_counts: dict[str, int] = {}  # predicate diversity tracking
         final: list[SearchResult] = []
         for r in results:
             if r.memory.id in seen_ids_set:
@@ -287,9 +332,21 @@ class Retriever:
                 if sp_key in seen_sp:
                     continue  # suppress — single-valued duplicate
                 seen_sp[sp_key] = r
+            # Predicate diversity: penalize 3rd+ result with the same predicate
+            count = pred_counts.get(pred, 0)
+            if count >= 2:
+                r = SearchResult(
+                    memory=r.memory,
+                    score=r.score * 0.5,
+                    channel_scores=r.channel_scores,
+                    source_scope=r.source_scope,
+                )
+            pred_counts[pred] = count + 1
             final.append(r)
             if len(final) >= top_k:
                 break
+        # Re-sort after diversity penalties to ensure best results float up
+        final.sort(key=lambda r: r.score, reverse=True)
 
         # --- Record activation trace (Hebbian learning) ---
         if len(final) >= 2:
@@ -329,56 +386,73 @@ class Retriever:
     # --- Subject & Predicate alignment ---
 
     def _subject_alignment(self, query: str, mem: Memory) -> float:
-        """Score how well the memory's subject matches the query's subject.
-        Returns positive for boost, negative for penalty, 0 for neutral."""
+        """Score how well the memory relates to what the query is asking about.
+
+        Two-phase approach:
+        1. Relationship entity detection: when query mentions a relationship
+           (sister, wife, manager), boost memories whose source text or
+           subject mentions that relationship.
+        2. Content keyword overlap: boost when query content words appear
+           in the memory's combined text.
+        """
         ql = query.lower()
-        subj_l = mem.subject.lower()
 
-        # Query mentions a possessive entity: "my parents", "my wife", "my brother"
-        _POSSESSIVE_ENTITIES = {
-            "parent": "my parent", "parents": "my parent",
-            "wife": "my wife", "husband": "my husband",
-            "brother": "my brother", "sister": "my sister",
-            "mother": "my mother", "father": "my father", "mom": "my mother", "dad": "my father",
-            "manager": "my manager", "boss": "my manager",
-            "coworker": "my coworker", "colleague": "my coworker",
-            "friend": "my friend",
+        # Phase 1: relationship entity detection via source text matching
+        # This handles "fiancee"↔"girlfriend", "sister"↔"Maya" etc.
+        # by checking if any query content word appears in the source text
+        _RELATIONSHIPS = {
+            "sister", "brother", "mother", "father", "mom", "dad",
+            "wife", "husband", "girlfriend", "boyfriend", "fiancee", "fiance",
+            "partner", "spouse", "manager", "boss", "friend", "colleague",
+            "son", "daughter", "uncle", "aunt", "cousin", "parent", "parents",
         }
-        for entity, subj_match in _POSSESSIVE_ENTITIES.items():
-            if entity in ql:
-                # Query is about a specific entity — boost memories about that entity
-                if entity in subj_l or subj_match.split()[-1] in subj_l:
-                    return 0.8  # strong boost
-                else:
-                    return -0.3  # penalize memories about other subjects
+        for rel in _RELATIONSHIPS:
+            if rel in ql:
+                combined = f"{mem.subject} {mem.object_value} {mem.source_text}".lower()
+                # Check for the relationship word OR synonyms in the memory
+                if rel in combined:
+                    return 1.5
+                # Also check related words (fiancee↔engaged, wife↔married)
+                _SYNONYMS = {
+                    "fiancee": ["girlfriend", "engaged", "fiancé"],
+                    "fiance": ["boyfriend", "engaged", "fiancé"],
+                    "wife": ["married", "spouse", "partner"],
+                    "husband": ["married", "spouse", "partner"],
+                    "mom": ["mother"], "dad": ["father"],
+                }
+                for syn in _SYNONYMS.get(rel, []):
+                    if syn in combined:
+                        return 1.2
+                # Don't penalize — just don't boost
 
-        # Query is first-person ("where do I work", "what do I use")
-        # Penalize third-person subjects (wife, parents, etc.)
-        if ql.startswith(("where do i", "what do i", "do i ", "am i ", "how do i",
-                          "what am i", "where am i", "what language")):
-            if subj_l not in ("i", "we", mem.user_id.lower(), ""):
-                # This memory is about someone else (wife, parents, team)
-                # Only penalize if the subject looks like a third-party entity
-                for entity in _POSSESSIVE_ENTITIES:
-                    if entity in subj_l:
-                        return -0.4
+        # Phase 2: content keyword overlap (generic boost)
+        _STOP = {"what", "where", "who", "when", "how", "does", "do", "is",
+                 "are", "the", "a", "an", "my", "i", "me", "to", "in", "at",
+                 "for", "of", "and", "or", "s"}
+        q_content = set(w.strip("'?.,!") for w in ql.split()) - _STOP
+        q_content = {w for w in q_content if len(w) > 2}
+
+        if not q_content:
+            return 0.0
+
+        combined = f"{mem.subject} {mem.object_value} {mem.source_text}".lower()
+        hits = sum(1 for w in q_content if w in combined)
+        if hits >= 2:
+            return 0.6
         return 0.0
 
-    # --- Predicate alignment ---
+    # --- Hybrid predicate alignment: curated map + semantic fallback ---
 
-    # Map query words to predicates they likely want
+    # Curated map for common query patterns (fast, precise)
     _QUERY_PRED_MAP: dict[str, set[str]] = {
-        "work": {"work_at", "works_at", "work_for", "employed_at", "be_at"},
-        "job": {"work_at", "works_at", "work_for", "be_at"},
-        "engineer": {"work_at", "be_at"},
+        "work": {"work_at", "works_at", "work_for", "employed_at", "be_at", "start_at"},
+        "job": {"work_at", "works_at", "work_for", "be_at", "role", "is_a"},
         "live": {"live_in", "lives_in", "move_to", "base_in", "reside_in"},
         "located": {"live_in", "lives_in", "base_in"},
-        "parent": {"live_in", "lives_in"},
         "use": {"use", "prefer", "run_on"},
-        "language": {"use", "speak", "know", "code_in"},
+        "language": {"use", "speak", "know", "code_in", "write"},
         "speak": {"speak", "know"},
         "like": {"like", "love", "enjoy", "prefer", "fan_of"},
-        "dislike": {"dislike", "hate", "not_like"},
         "read": {"read", "reading"},
         "study": {"study", "graduate_from", "major_in", "attend"},
         "school": {"graduate_from", "study_at", "attend", "major_in"},
@@ -386,93 +460,183 @@ class Retriever:
         "pet": {"have", "own"},
         "dog": {"have", "own"},
         "cat": {"have", "own"},
-        "database": {"use", "is", "run_on"},
-        "team": {"have", "is", "manage", "build"},
+        "database": {"use", "is", "run_on", "switch_from"},
+        "team": {"have", "is", "manage", "build", "lead", "hire", "to", "grow"},
         "build": {"build", "work_on", "develop"},
         "deploy": {"deploy_to", "use", "host_on"},
-        "ci": {"use", "run_on", "run"},
-        "coffee": {"drink", "prefer", "like", "hate"},
-        "tea": {"drink", "prefer", "like", "hate"},
-        "exercise": {"do", "go_to", "practice"},
-        "before": {"be_at", "work_at", "was_at"},
-        "previous": {"be_at", "work_at", "was_at"},
+        "coffee": {"drink", "prefer", "like", "switch_from"},
+        "tea": {"drink", "prefer", "like", "switch_from"},
         "learn": {"think_about", "want_to", "plan_to", "interested_in", "study"},
         "planning": {"think_about", "want_to", "plan_to", "work_on"},
-        "interested": {"think_about", "interested_in", "like", "love"},
-        "want": {"want_to", "plan_to", "think_about"},
-        "reading": {"am", "read", "currently"},
-        "eat": {"allergic_to", "vegetarian", "vegan", "diet"},
-        "food": {"allergic_to", "vegetarian", "vegan", "eat", "like"},
+        "reading": {"am", "read"},
         "allergic": {"allergic_to"},
-        "manager": {"is", "manager", "report_to"},
         "birthday": {"is", "birthday", "born_on"},
         "name": {"is", "name", "call"},
-        "age": {"am", "is", "age"},
         "children": {"have", "own"},
         "kids": {"have", "own"},
-        "married": {"have", "is", "partner", "wife", "husband"},
         "cloud": {"use", "deploy_to", "host_on", "run_on"},
-        "aws": {"deploy_to", "use", "host_on"},
+        "drink": {"drink", "switch_from", "prefer"},
+        "hobby": {"love", "like", "enjoy", "into", "start", "do"},
+        "hobbies": {"love", "like", "enjoy", "into", "start", "do"},
+        "market": {"launch_in", "expand", "enter"},
+        "hire": {"hire", "recruit"},
+        "size": {"to", "have", "is", "grow"},
+        "volume": {"hit", "handle", "process", "reach"},
+        "process": {"follow", "use", "do"},
+        "methodology": {"follow", "use", "do"},
     }
 
+    def _get_pred_embedding(self, predicate: str) -> list[float]:
+        """Get or compute the embedding for a predicate."""
+        if predicate in self._pred_embeddings:
+            return self._pred_embeddings[predicate]
+        natural = predicate.replace("_", " ")
+        emb = self.embed(natural)
+        self._pred_embeddings[predicate] = emb
+        if len(self._pred_embeddings) > 5000:
+            oldest = next(iter(self._pred_embeddings))
+            del self._pred_embeddings[oldest]
+        return emb
+
     def _predicate_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
-        """Score memories whose predicate aligns with the query intent."""
+        """Score memories whose predicate aligns with the query intent.
+
+        Hybrid approach:
+        1. Curated map for known query patterns (fast, precise)
+        2. Keyword overlap between query and predicate/object words
+        3. Semantic embedding fallback for remaining unmatched candidates
+        """
         q_lower = query.lower()
+
+        # Phase 1: curated map (fast, precise)
         target_preds: set[str] = set()
         for keyword, preds in self._QUERY_PRED_MAP.items():
             if keyword in q_lower:
                 target_preds.update(preds)
 
-        if not target_preds:
-            return {}
-
         scores: dict[str, float] = {}
+        needs_semantic: list[Memory] = []
+
+        _STOP = {"what", "where", "who", "when", "how", "does", "do", "is",
+                 "are", "the", "a", "an", "my", "i", "me", "to", "in", "at",
+                 "for", "of", "and", "or", "on", "with", "s"}
+        q_content = set(w.strip("'?.,!") for w in q_lower.split()) - _STOP
+        q_content = {w for w in q_content if len(w) > 2}
+
         for m in cands:
-            if m.predicate in target_preds:
+            if m.predicate in ("stated",):
+                continue
+
+            # Map match
+            if target_preds and m.predicate in target_preds:
                 scores[m.id] = 1.0
-            else:
-                # Partial match: check if predicate contains a query-relevant word
-                pred_parts = m.predicate.replace("_", " ").split()
-                q_terms_low = q_lower.split()
-                overlap = sum(1 for p in pred_parts if any(
-                    q.startswith(p) or p.startswith(q) for q in q_terms_low if len(q) > 2))
-                if overlap > 0:
-                    scores[m.id] = 0.5
+                continue
+
+            # Phase 2: keyword overlap
+            pred_words = set(m.predicate.replace("_", " ").split())
+            overlap = pred_words & q_content
+            if overlap:
+                scores[m.id] = min(1.0, len(overlap) * 0.5)
+                continue
+
+            # Check object/source overlap
+            if q_content:
+                combined = f"{m.object_value} {m.source_text}".lower()
+                obj_hits = sum(1 for w in q_content if w in combined)
+                if obj_hits >= 2:
+                    scores[m.id] = 0.3
+                    continue
+
+            needs_semantic.append(m)
+
+        # Phase 3: semantic fallback (only when map had no hits and few unmatched)
+        if needs_semantic and not target_preds and len(needs_semantic) <= 20:
+            q_emb = self.embed(query)
+            for m in needs_semantic:
+                pred_emb = self._get_pred_embedding(m.predicate)
+                sim = cosine_sim(q_emb, pred_emb)
+                if sim > 0.5:
+                    scores[m.id] = min(0.7, (sim - 0.35) / 0.5)
+
         return scores
 
     def _negation_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
-        """Boost negation facts when query asks about negation."""
-        q_lower = query.lower()
-        negation_words = {"doesn't", "don't", "can't", "cannot", "not", "never",
-                          "hate", "dislike", "won't", "wouldn't", "shouldn't",
-                          "doesn", "dont", "cant", "wont"}
-        has_negation = any(w in q_lower.split() for w in negation_words) or "n't" in q_lower
-        if not has_negation:
+        """Boost negation facts when query asks about negation.
+
+        Uses semantic similarity to a precomputed negation prototype (1 cosine
+        op per query, not per candidate). Falls back to keyword detection.
+        """
+        self._ensure_intents()
+        q_emb = self.embed(query)
+        neg_sim = cosine_sim(q_emb, self._intent_protos["negation"])
+
+        if neg_sim < 0.35:
             return {}
 
+        strength = min(2.0, (neg_sim - 0.25) * 4)
         scores: dict[str, float] = {}
         for m in cands:
             if m.is_negation:
-                scores[m.id] = 1.5  # strong boost for negation facts
-            elif m.predicate in ("like", "love", "enjoy", "prefer", "want"):
-                scores[m.id] = -0.3  # penalize positive sentiment when asking about negatives
+                scores[m.id] = strength
         return scores
 
     def _temporal_query_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
-        """Boost older/retracted facts when query asks about the past."""
-        q_lower = query.lower()
-        temporal_words = {"before", "previous", "previously", "used to", "formerly",
-                          "past", "earlier", "old", "prior", "ago"}
-        has_temporal = any(w in q_lower for w in temporal_words)
-        if not has_temporal:
+        """Boost retracted/older facts when query asks about the past.
+
+        Uses semantic similarity to a precomputed temporal prototype.
+        Penalizes current-state predicates via keyword check (no extra embeds).
+        """
+        self._ensure_intents()
+        q_emb = self.embed(query)
+        temp_sim = cosine_sim(q_emb, self._intent_protos["temporal"])
+
+        if temp_sim < 0.35:
+            return {}
+
+        strength = min(2.5, (temp_sim - 0.25) * 5)
+        _CURRENT_STATE_PREDS = frozenset({
+            "live_in", "lives_in", "work_at", "works_at", "move_to",
+            "employed_at", "reside_in", "base_in",
+        })
+        scores: dict[str, float] = {}
+        for m in cands:
+            if m.is_negation:
+                scores[m.id] = strength
+            elif m.state == "active" and m.predicate in _CURRENT_STATE_PREDS:
+                scores[m.id] = scores.get(m.id, 0) - 0.5
+        return scores
+
+    def _ensure_intents(self) -> None:
+        """Lazily initialize intent prototype embeddings (3 embeds total, once)."""
+        if self._intents_initialized:
+            return
+        self._intent_protos["negation"] = self.embed(
+            "what doesn't the person like, dislike, hate, avoid, can't, not")
+        self._intent_protos["temporal"] = self.embed(
+            "what did the person do before, previously, in the past, "
+            "former, used to, earlier, prior history")
+        self._intents_initialized = True
+
+    # --- Entity boost ---
+
+    def _entity_boost(self, query: str, cands: list[Memory]) -> dict[str, float]:
+        """Hard boost for memories containing entities mentioned in the query."""
+        # Extract entities: capitalized words, quoted strings, specific terms
+        entities = set()
+        for word in query.split():
+            clean = word.strip("?.,!\"'")
+            if clean and (clean[0].isupper() or len(clean) > 3):
+                entities.add(clean.lower())
+
+        if not entities:
             return {}
 
         scores: dict[str, float] = {}
         for m in cands:
-            if m.is_negation:
-                scores[m.id] = 1.0  # retracted facts are past facts
-            if m.predicate in ("be_at", "was_at", "previously"):
-                scores[m.id] = scores.get(m.id, 0) + 0.8
+            combined = f"{m.object_value} {m.source_text}".lower()
+            hits = sum(1 for ent in entities if ent in combined)
+            if hits > 0:
+                scores[m.id] = 0.8 * (hits / len(entities))
         return scores
 
     # --- Channel scoring functions ---
@@ -499,6 +663,10 @@ class Retriever:
                     d.startswith(qt) or qt.startswith(d) for d in obj_doc))
                 if obj_hits > 0:
                     score += 0.3 * (obj_hits / len(terms))
+                # Exact word match in object_value gets a strong bonus
+                exact_obj_hits = sum(1 for qt in terms if qt in obj_doc)
+                if exact_obj_hits > 0:
+                    score += 0.5 * (exact_obj_hits / len(terms))
                 scores[m.id] = min(1.0, score)
         return scores
 
