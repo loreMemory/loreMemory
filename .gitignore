@@ -55,4 +55,7 @@ lore_data/
 Thumbs.db
 
 # Working docs
-Spo_deep_optimize.mdmodels/
+Spo_deep_optimize.md
+
+# Fine-tuned models (large binaries)
+models/
