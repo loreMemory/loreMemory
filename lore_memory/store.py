@@ -264,17 +264,27 @@ class MemoryDB:
             row = self.conn.execute("SELECT * FROM memories WHERE id=?", (mem_id,)).fetchone()
             return self._to_mem(row) if row else None
 
-    def query_by_subject(self, subject: str, context: str | None = None, limit: int = 500) -> list[Memory]:
+    def query_by_subject(self, subject: str, context: str | None = None,
+                         limit: int = 500, exclude_stated: bool = False) -> list[Memory]:
+        """Fetch active memories for a subject.
+
+        exclude_stated: when True, drop predicate='stated' rows. Dedup and
+        supersession never consider stated (journal) rows, and a heavy user
+        can accumulate hundreds of them — leaving them in the result set
+        pushes real structured facts out of the LIMIT window and causes
+        silent supersession failures at scale.
+        """
         with self._lock:
             now = time.time()
+            stated_clause = " AND predicate != 'stated'" if exclude_stated else ""
             if context:
                 rows = self.conn.execute(
-                    "SELECT * FROM memories WHERE subject=? AND context=? AND state='active' AND (valid_until IS NULL OR valid_until > ?) ORDER BY updated_at DESC LIMIT ?",
+                    f"SELECT * FROM memories WHERE subject=? AND context=? AND state='active'{stated_clause} AND (valid_until IS NULL OR valid_until > ?) ORDER BY updated_at DESC LIMIT ?",
                     (subject, context, now, limit),
                 ).fetchall()
             else:
                 rows = self.conn.execute(
-                    "SELECT * FROM memories WHERE subject=? AND state='active' AND (valid_until IS NULL OR valid_until > ?) ORDER BY updated_at DESC LIMIT ?",
+                    f"SELECT * FROM memories WHERE subject=? AND state='active'{stated_clause} AND (valid_until IS NULL OR valid_until > ?) ORDER BY updated_at DESC LIMIT ?",
                     (subject, now, limit),
                 ).fetchall()
             return [self._to_mem(r) for r in rows]

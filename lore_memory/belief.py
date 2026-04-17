@@ -42,7 +42,9 @@ def check_contradictions(db: MemoryDB, new_mem: Memory,
     """Check new memory against existing for contradictions. Returns contradicted IDs."""
     s = schema or PERSONAL_LIFE_SCHEMA
     canon_new = s.canon(new_mem.predicate)
-    existing = db.query_by_subject(new_mem.subject)
+    # Exclude 'stated' (journal) rows — contradiction checks only compare
+    # structured facts, and journal rows swamp the LIMIT window at scale.
+    existing = db.query_by_subject(new_mem.subject, exclude_stated=True)
     contradicted = []
 
     for ex in existing:
@@ -90,7 +92,7 @@ def check_cross_scope_contradictions(
     canon_pred = s.canon(predicate)
     contradicted = []
     for db in dbs:
-        for ex in db.query_by_subject(subject):
+        for ex in db.query_by_subject(subject, exclude_stated=True):
             if ex.state != "active":
                 continue
             if s.canon(ex.predicate) == canon_pred and ex.object_value != object_value:

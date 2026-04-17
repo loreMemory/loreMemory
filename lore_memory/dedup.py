@@ -99,7 +99,10 @@ class DedupEngine:
             return DedupResult()
 
         # One subject scan, shared across all tiers.
-        existing = db.query_by_subject(new_mem.subject, limit=200)
+        # Exclude 'stated' (journal) rows — they never participate in dedup
+        # and at scale they swamp the LIMIT window, hiding real structured
+        # facts from supersession.
+        existing = db.query_by_subject(new_mem.subject, limit=200, exclude_stated=True)
 
         # Type 1: Exact duplicate
         result = self._check_exact(new_mem, existing)

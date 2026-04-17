@@ -535,10 +535,13 @@ class GrammarFreeExtractor:
                             source="cooccurrence",
                         ))
 
-        # Approach B: Contextual inference from self-reference patterns
+        # Approach B: Contextual inference from self-reference patterns.
+        # Use word boundaries so names like "Ines", "Ivan", "Iris" don't match "i".
         lower = text.lower()
-        is_self = any(lower.startswith(m) or f" {m} " in f" {lower} "
-                      for m in _SELF_MARKERS)
+        is_self = any(
+            re.search(rf"(?:^|\s){re.escape(m)}(?:\s|$|['.,!?])", lower)
+            for m in _SELF_MARKERS
+        )
         if is_self:
             for ent in entities:
                 between = _extract_between_text(text, self._get_self_ref(lower), ent)
@@ -602,9 +605,10 @@ class GrammarFreeExtractor:
             return []  # Sentence type falls back to grammar parser or entity co-occurrence
 
     def _get_self_ref(self, lower_text: str) -> str:
-        """Find the self-reference token in text."""
+        """Find the self-reference token in text. Uses word boundaries so
+        names starting with 'I' (Ines, Ivan, Iris, Isabel) don't match."""
         for marker in ("i'm", "i am", "i've", "i have", "i"):
-            if lower_text.startswith(marker):
+            if re.match(rf"{re.escape(marker)}(?:\s|$|['.,!?])", lower_text):
                 return marker
             idx = lower_text.find(f" {marker} ")
             if idx >= 0:

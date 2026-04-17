@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.9 — 2026-04-16
+
+Three correctness fixes uncovered by an adversarial 2 100-store stress run.
+
+- **Phantom I-name facts** (`extraction_gf.py`). `"Ines lives in Paris"` matched `str.startswith("i")` and produced a second triple `(user, nes_lives_in, Paris)` alongside the correct `(Ines, lives_in, Paris)`. At 2 100 stores this credited the user with 12 cities and 10 companies they had never visited or worked at. Fix: word-boundary regex on first-person markers.
+- **Supersession silently broken at scale** (`dedup.py`, `belief.py`, `store.py`). Every `store()` writes a `predicate='stated'` journal row against the user's subject. After ~700 journal rows the dedup scan's `query_by_subject(limit=200)` returned only journal rows, ordered by `updated_at DESC`; the original `live_in=Berlin` fact was outside the window, so `store("I live in Amsterdam now")` no longer saw it and Berlin survived. Fix: `query_by_subject(..., exclude_stated=True)` for dedup and contradiction checks. Journal rows never participated in those checks anyway.
+- **`"My X is Y"` over-fitted to a noun lexicon** (`extraction.py`). `"My hobby is rock climbing"` came out as `(user, is, rock climbing)` because `hobby` wasn't in the curated relationship-noun list. Replaced the lexicon lookup with a grammar rule: head noun of the phrase becomes the predicate, with a small leading-quantifier strip (`best`, `primary`, `main`, `own`, `only`, `current`, ...) so `"My best friend is Mateo"` still produces `friend=Mateo`. Generalises to `hobby`, `goal`, `dream`, `pet cat` etc. without enumerating nouns.
+
+Stress run (2 100 third-party noise facts + 10 user identity facts):
+- Pre-fix: 7/10 correct; supersession fails silently; 22 phantom facts attributed to user.
+- Post-fix: 8/10 correct; supersession works; 0 phantom facts. The two remaining failures (`"what is my job?"`, `"do I have pets?"`) correctly return `needs_clarification=True` with certainty <0.05 — honest "I don't know" instead of confidently wrong.
+
+Harness unchanged: 79.5 % top-1, 89.7 % top-3, 556 inserts/s (+2.6 %). 384 / 384 tests pass.
+
 ## v1.0.8 — 2026-04-16
 
 Security hardening, per-tenant schema, scale, and a non-developer chat UX.

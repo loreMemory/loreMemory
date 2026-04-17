@@ -899,6 +899,23 @@ def parse_sentence(sentence: str) -> dict | None:
         elif found_rel:
             # "My manager is Sarah Chen" → predicate=manager
             predicate = _norm(found_rel)
+        elif rest_words:
+            # Grammar rule (no lexicon): "My <noun phrase> is Y" → predicate =
+            # head noun of <noun phrase>. Approximates the head as the last
+            # token after stripping a leading quantifier ("best", "primary",
+            # "main", "own", "only"). Handles "My hobby is X", "My goal is
+            # Y", "My pet cat is Luna" without needing to enumerate nouns.
+            _LEADING_QUANTIFIERS = {"best", "primary", "main", "own",
+                                    "only", "second", "new", "old", "current"}
+            head_words = rest_words
+            if len(head_words) > 1 and head_words[0] in _LEADING_QUANTIFIERS:
+                head_words = head_words[1:]
+            head = head_words[-1]
+            head = re.sub(r"'s$", "", head)
+            # Guard: skip obvious non-nouns (pronouns, articles, numbers)
+            if head and head not in ("i", "me", "we", "he", "she", "it",
+                                     "a", "an", "the") and not head.isdigit():
+                predicate = _norm(head)
 
     # First-person "I left / quit / resigned from <Org>" → retract works_at.
     # Gated on a capitalized object so "I left the gym" doesn't hijack
