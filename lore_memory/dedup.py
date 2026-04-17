@@ -86,6 +86,11 @@ class DedupEngine:
         """Run all dedup checks on a new memory before storage.
 
         Returns DedupResult indicating if this is a duplicate and what to do.
+
+        Optimisation: fetches existing same-subject rows ONCE and shares the
+        list across all five tiers. The previous implementation issued five
+        separate query_by_subject calls per insert, which dominated write
+        throughput at scale.
         """
         self.stats.total_checked += 1
 
@@ -93,42 +98,48 @@ class DedupEngine:
             # Raw text memories use exact dedup only (via db.put)
             return DedupResult()
 
+        # One subject scan, shared across all tiers.
+        existing = db.query_by_subject(new_mem.subject, limit=200)
+
         # Type 1: Exact duplicate
-        result = self._check_exact(new_mem, db)
+        result = self._check_exact(new_mem, existing)
         if result.is_duplicate:
             self.stats.exact += 1
             return result
 
-        # Type 2: Near duplicate (embedding similarity)
-        if embed_fn and new_mem.embedding:
-            result = self._check_near(new_mem, db)
+        # Type 2: Near duplicate (embedding similarity).
+        # Skipped for single-valued predicates because Tier 3 handles them
+        # cleanly via canonical-predicate supersession — avoiding up to 200
+        # cosine comparisons per insert on hot subjects.
+        if (embed_fn and new_mem.embedding
+                and not is_single_valued(new_mem.predicate)):
+            result = self._check_near(new_mem, existing)
             if result.is_duplicate:
                 self.stats.near += 1
                 return result
 
         # Type 3: Same subject+predicate, different object (single-valued)
-        result = self._check_same_sp(new_mem, db)
+        result = self._check_same_sp(new_mem, existing)
         if result.is_duplicate:
             self.stats.same_sp += 1
             return result
 
         # Type 4: Cross-tool duplicate (different predicate, same meaning)
-        result = self._check_cross_tool(new_mem, db)
+        result = self._check_cross_tool(new_mem, existing)
         if result.is_duplicate:
             self.stats.cross_tool += 1
             return result
 
         # Type 5: Temporal duplicate
-        result = self._check_temporal(new_mem, db)
+        result = self._check_temporal(new_mem, existing)
         if result.is_duplicate:
             self.stats.temporal += 1
             return result
 
         return DedupResult()
 
-    def _check_exact(self, new_mem: Memory, db: MemoryDB) -> DedupResult:
+    def _check_exact(self, new_mem: Memory, existing: list[Memory]) -> DedupResult:
         """Type 1: Exact (S, P, O, negation) match."""
-        existing = db.query_by_subject(new_mem.subject, limit=200)
         for ex in existing:
             if (ex.predicate == new_mem.predicate
                     and ex.object_value == new_mem.object_value
@@ -143,7 +154,7 @@ class DedupEngine:
                 )
         return DedupResult()
 
-    def _check_near(self, new_mem: Memory, db: MemoryDB) -> DedupResult:
+    def _check_near(self, new_mem: Memory, existing: list[Memory]) -> DedupResult:
         """Type 2: Same meaning, different surface form.
 
         Uses embedding similarity on the full triplet text.
@@ -152,7 +163,6 @@ class DedupEngine:
         if not new_mem.embedding:
             return DedupResult()
 
-        existing = db.query_by_subject(new_mem.subject, limit=200)
         for ex in existing:
             if ex.state != "active" or not ex.embedding:
                 continue
@@ -185,7 +195,7 @@ class DedupEngine:
                     )
         return DedupResult()
 
-    def _check_same_sp(self, new_mem: Memory, db: MemoryDB) -> DedupResult:
+    def _check_same_sp(self, new_mem: Memory, existing: list[Memory]) -> DedupResult:
         """Type 3: Same subject + predicate, different object.
 
         For single-valued predicates, the new value supersedes the old.
@@ -197,7 +207,6 @@ class DedupEngine:
             return DedupResult()
 
         canon_pred = canon(new_mem.predicate)
-        existing = db.query_by_subject(new_mem.subject, limit=200)
         for ex in existing:
             if ex.state != "active":
                 continue
@@ -212,7 +221,7 @@ class DedupEngine:
                     )
         return DedupResult()
 
-    def _check_cross_tool(self, new_mem: Memory, db: MemoryDB) -> DedupResult:
+    def _check_cross_tool(self, new_mem: Memory, existing: list[Memory]) -> DedupResult:
         """Type 4: Same fact from different tools with different predicates.
 
         Uses predicate clustering + object canonicalization to detect
@@ -227,7 +236,6 @@ class DedupEngine:
         canon_obj = self._normalizer.object_canonicalizer.canonicalize(
             new_mem.object_value)
 
-        existing = db.query_by_subject(new_mem.subject, limit=200)
         for ex in existing:
             if ex.state != "active" or ex.predicate == "stated":
                 continue
@@ -266,14 +274,13 @@ class DedupEngine:
 
         return DedupResult()
 
-    def _check_temporal(self, new_mem: Memory, db: MemoryDB) -> DedupResult:
+    def _check_temporal(self, new_mem: Memory, existing: list[Memory]) -> DedupResult:
         """Type 5: Fact was true but is now stale.
 
         Detects when an existing fact has expired or been superseded
         by a newer version of the same fact.
         """
         now = time.time()
-        existing = db.query_by_subject(new_mem.subject, limit=200)
         for ex in existing:
             if ex.state != "active":
                 continue

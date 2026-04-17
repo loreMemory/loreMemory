@@ -1,0 +1,295 @@
+{
+  "quality": {
+    "total": 39,
+    "top1_correct": 31,
+    "top3_correct": 35,
+    "top1_pct": 79.48717948717949,
+    "top3_pct": 89.74358974358974,
+    "p50_ms": 17.223166000000845,
+    "p95_ms": 24.735500000000243,
+    "p99_ms": 72.88608299999844,
+    "per_check": [
+      {
+        "label": "onboard_name",
+        "q": "what is my name?",
+        "top": "My name is Sam Rivera",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "onboard_bday",
+        "q": "when is my birthday?",
+        "top": "My birthday is March 12",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "onboard_allergy",
+        "q": "what am I allergic to?",
+        "top": "I'm allergic to penicillin",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "onboard_food",
+        "q": "what is my favorite food?",
+        "top": "My favorite food is ramen",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "onboard_edu",
+        "q": "where did I study?",
+        "top": "I studied mechanical engineering at TU Delft",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_manager",
+        "q": "who is my manager?",
+        "top": "My manager is Chen Wei",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_sister",
+        "q": "where does my sister live?",
+        "top": "My sister Noor lives in Toronto",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_best_friend",
+        "q": "who is my best friend?",
+        "top": "My best friend is Mateo, he lives in Lisbon",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_priya",
+        "q": "where does Priya work?",
+        "top": "My friend Priya works at Google DeepMind in London",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_chess",
+        "q": "what's my chess rating?",
+        "top": "I play chess, rated around 1800 on lichess",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_hate",
+        "q": "what food do I hate?",
+        "top": "My favorite food is ramen",
+        "top1_correct": false,
+        "in_top3": true
+      },
+      {
+        "label": "grow_learning",
+        "q": "what language am I learning?",
+        "top": "I'm learning Italian on Duolingo",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_film",
+        "q": "what is my favorite film?",
+        "top": "My favorite food is ramen",
+        "top1_correct": false,
+        "in_top3": true
+      },
+      {
+        "label": "grow_team",
+        "q": "what team am I on at Stripe?",
+        "top": "I'm on the payments reliability team at Stripe",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_lantern_stripe",
+        "q": "what is Project Lantern about fraud?",
+        "top": "Project Lantern is our new fraud detection pipeline",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "grow_mom_city",
+        "q": "where does my mother live?",
+        "top": "My mother Amina is retired, lives in Utrecht",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "supersede_city",
+        "q": "where do I live now?",
+        "top": "I moved from Amsterdam to Berlin last month",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "supersede_work",
+        "q": "where do I work now?",
+        "top": "I joined Anthropic as a research engineer",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "supersede_role",
+        "q": "what's my role?",
+        "top": "I joined Anthropic as a research engineer",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "supersede_pet",
+        "q": "do I have a pet?",
+        "top": "My downstairs neighbor has a cat also named Miso \u2014 theirs is orange",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "supersede_age",
+        "q": "how old am I?",
+        "top": "I'm 34 years old",
+        "top1_correct": false,
+        "in_top3": false
+      },
+      {
+        "label": "ambig_my_name",
+        "q": "what is MY name?",
+        "top": "My name is Sam Rivera",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "ambig_sam_chen",
+        "q": "where is Sam Chen from?",
+        "top": "Sam Chen is from Singapore",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "ambig_bakery",
+        "q": "who owns the bakery?",
+        "top": "My neighbor Priya (different from Priya at DeepMind) owns a bakery on Kastanienallee",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "ambig_deepmind",
+        "q": "who works at DeepMind?",
+        "top": "My friend Priya works at Google DeepMind in London",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "ambig_lantern_anth",
+        "q": "what is Lantern at Anthropic?",
+        "top": "At Anthropic I'm on Project Lantern (the safety eval one, not Stripe's fraud one)",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "ambig_my_cat_color",
+        "q": "what color is my cat?",
+        "top": "My downstairs neighbor has a cat also named Miso \u2014 theirs is orange",
+        "top1_correct": false,
+        "in_top3": false
+      },
+      {
+        "label": "ambig_neighbor_cat",
+        "q": "what color is my neighbor's cat?",
+        "top": "My downstairs neighbor has a cat also named Miso \u2014 theirs is orange",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "post_noise_name",
+        "q": "what is my name?",
+        "top": "My name is Sam Rivera",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "post_noise_cat",
+        "q": "what's my cat's name?",
+        "top": "My downstairs neighbor has a cat also named Miso \u2014 theirs is orange",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "post_noise_chess",
+        "q": "do I play chess?",
+        "top": "I play chess, rated around 1800 on lichess",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "cascade_city",
+        "q": "where do I live right now?",
+        "top": "I moved from Amsterdam to Berlin last month",
+        "top1_correct": false,
+        "in_top3": false
+      },
+      {
+        "label": "cascade_team",
+        "q": "what team am I on?",
+        "top": "I had knee surgery in 2020, left meniscus",
+        "top1_correct": false,
+        "in_top3": false
+      },
+      {
+        "label": "cascade_partner",
+        "q": "am I dating anyone?",
+        "top": "Meeting got pushed to Thursday",
+        "top1_correct": false,
+        "in_top3": true
+      },
+      {
+        "label": "tail_best_friend",
+        "q": "who is my best friend?",
+        "top": "My best friend is Mateo, he lives in Lisbon",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "tail_allergy",
+        "q": "am I allergic to anything?",
+        "top": "I'm allergic to penicillin",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "tail_edu",
+        "q": "where did I study?",
+        "top": "I studied mechanical engineering at TU Delft",
+        "top1_correct": true,
+        "in_top3": true
+      },
+      {
+        "label": "tail_film",
+        "q": "what's my favorite film?",
+        "top": "My favorite food is ramen",
+        "top1_correct": false,
+        "in_top3": true
+      },
+      {
+        "label": "tail_old_manager",
+        "q": "who was my old manager at Stripe?",
+        "top": "My manager is Chen Wei",
+        "top1_correct": true,
+        "in_top3": true
+      }
+    ]
+  },
+  "perf": {
+    "facts_inserted": 1000,
+    "insert_seconds": 1.8438647919999998,
+    "inserts_per_sec": 542.3391152858459,
+    "retrieval_p50_ms": 8.689374999999444,
+    "retrieval_p95_ms": 9.152333999999485
+  },
+  "timestamp": 1776396730.9218519
+}

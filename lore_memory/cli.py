@@ -2,6 +2,7 @@
 Lore Memory CLI — command-line interface for persistent AI memory.
 
 Usage:
+    lore chat                              # interactive REPL (recommended)
     lore store "I work at Google and love Python"
     lore query "where do I work?"
     lore list
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import re
 
 
 def _get_memory(args):
@@ -155,6 +157,167 @@ def cmd_mcp(args):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+#  Interactive REPL
+# ---------------------------------------------------------------------------
+
+# Sentence-start tokens that mark a question in English. Combined with a
+# trailing "?" check, these catch the vast majority of questions without
+# forcing the user to remember a special syntax. English-only, matches the
+# product scope.
+_QUESTION_STARTERS = (
+    "what", "where", "when", "who", "whom", "why", "how", "which",
+    "is", "are", "am", "do", "does", "did", "can", "could", "should",
+    "would", "was", "were", "will", "have", "has", "had",
+    "tell me", "show me", "list",
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    """Distinguish a question from a statement for the REPL.
+
+    Signals: trailing '?', or sentence-starts with a question word. Lightly
+    tuned for English natural chat; when in doubt, we treat as a statement
+    so the user's facts are stored rather than quietly queried.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    if t.endswith("?"):
+        return True
+    low = t.lower()
+    for start in _QUESTION_STARTERS:
+        if low == start or low.startswith(start + " "):
+            return True
+    return False
+
+
+def _render_answer(r) -> str:
+    """Format a QueryResult for conversational display."""
+    if r.answer is None:
+        return "I don't have anything about that yet."
+    text = r.answer.text.strip()
+    if r.answer.is_suspicious:
+        text = f"(flagged as suspicious) {text}"
+    if not r.needs_clarification:
+        return f"→ {text}"
+    # Ambiguous: show top options so the user can disambiguate.
+    lines = [
+        f"I'm not sure — I see several things that could match "
+        f"(certainty {r.certainty:.2f}).",
+        f"  • {text}",
+    ]
+    for alt in r.alternatives[1:3]:
+        lines.append(f"  • {alt.text.strip()}")
+    return "\n".join(lines)
+
+
+def _chat_help() -> str:
+    return (
+        "Commands:\n"
+        "  /help            show this help\n"
+        "  /list            show everything I know about you\n"
+        "  /stats           fact counts\n"
+        "  /forget all      delete every memory for this user\n"
+        "  /export <path>   write all memories to a JSONL file\n"
+        "  /exit  or  /quit leave\n"
+        "\n"
+        "Anything else: if it ends with '?' or starts with 'what/where/who/...'\n"
+        "I treat it as a question. Otherwise I remember it."
+    )
+
+
+def cmd_chat(args):
+    """Interactive REPL — natural-language store and ask.
+
+    A non-developer friendly mode: type a fact to remember it, type a
+    question to recall. Slash commands handle the rest.
+    """
+    m = _get_memory(args)
+    user = getattr(args, "user", "default") or "default"
+    _first_input = [True]
+
+    def _warmup_hint():
+        # Emit exactly once, right before the first real request runs.
+        if _first_input[0]:
+            _first_input[0] = False
+            from lore_memory.engine import Engine as _Eng
+            if not _Eng._ST_PROBED:
+                print("  (loading embedding model — a few seconds only the first time...)",
+                      flush=True)
+
+    try:
+        print(f"Lore memory — chatting as '{user}'. Type /help for commands, /exit to leave.")
+        while True:
+            try:
+                line = input("you> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not line:
+                continue
+            # --- slash commands ---
+            if line.startswith("/"):
+                cmd, _, rest = line[1:].partition(" ")
+                cmd = cmd.lower()
+                rest = rest.strip()
+                if cmd in ("exit", "quit", "q"):
+                    break
+                elif cmd in ("help", "h", "?"):
+                    print(_chat_help())
+                elif cmd == "list":
+                    prof = m.profile()
+                    if not prof:
+                        print("(nothing stored yet)")
+                    else:
+                        for pred in sorted(prof):
+                            for e in prof[pred]:
+                                val = e.get("value", str(e))
+                                neg = "not " if e.get("negation") else ""
+                                print(f"  {pred}: {neg}{val}")
+                elif cmd == "stats":
+                    for k, v in sorted(m.stats().items()):
+                        print(f"  {k.replace('_',' ')}: {v}")
+                elif cmd == "forget":
+                    if rest == "all":
+                        confirm = input("  Delete ALL your memories? type YES to confirm: ").strip()
+                        if confirm == "YES":
+                            m.forget_all(hard=True)
+                            print("  Done — all memories deleted.")
+                        else:
+                            print("  Cancelled.")
+                    else:
+                        print("  Only '/forget all' is supported in chat. For per-fact deletion use 'lore forget <id>'.")
+                elif cmd == "export":
+                    if not rest:
+                        print("  Usage: /export <path>.jsonl")
+                        continue
+                    n = m.export_to_jsonl(rest)
+                    print(f"  Wrote {n} rows to {rest}.")
+                else:
+                    print(f"  Unknown command: /{cmd}. Try /help.")
+                continue
+
+            # --- plain text: question or fact ---
+            _warmup_hint()
+            if _looks_like_question(line):
+                r = m.query_one(line)
+                print(_render_answer(r))
+            else:
+                res = m.store(line)
+                bits = []
+                if res.get("created"):
+                    bits.append(f"remembered ({res['created']})")
+                if res.get("contradictions"):
+                    bits.append(f"superseded {res['contradictions']}")
+                if res.get("deduplicated"):
+                    bits.append(f"deduplicated {res['deduplicated']}")
+                print("  " + (", ".join(bits) if bits else "got it."))
+    finally:
+        m.close()
+    print("bye.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="lore",
@@ -166,6 +329,11 @@ def main():
                         help="Data directory (default: ~/.lore-memory)")
 
     sub = parser.add_subparsers(dest="command")
+
+    # chat (interactive REPL — recommended entry point)
+    p_chat = sub.add_parser("chat",
+                             help="Interactive REPL (recommended for new users)")
+    p_chat.set_defaults(func=cmd_chat)
 
     # store
     p_store = sub.add_parser("store", help="Store a memory")

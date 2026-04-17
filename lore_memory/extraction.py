@@ -393,11 +393,17 @@ def _detect_temporal(text: str) -> tuple[float | None, str]:
         cleaned = text[:m.start()].strip() + " " + text[m.end():].strip()
         return _time.time() + secs, cleaned.strip()
 
-    # "last week" / "yesterday" / "a few days ago" → already past
+    # "last week" / "yesterday" / "a few days ago" describe WHEN an event
+    # happened, not when the resulting fact expires. "I moved to Berlin
+    # last month" must leave the resulting `lives_in=Berlin` fact ACTIVE.
+    # We clean the phrase out of the object so the triple is clean, but do
+    # not set valid_until — we don't have a valid_from column and faking
+    # it via expiry wipes the fact from query_active() silently. Users
+    # retract explicitly via "I used to live in X" (handled separately).
     m = _TEMPORAL_PAST.search(text)
     if m:
         cleaned = text[:m.start()].strip() + " " + text[m.end():].strip()
-        return _time.time() - 1, cleaned.strip()  # already expired
+        return None, cleaned.strip()
 
     return None, text
 
@@ -569,17 +575,7 @@ def parse_sentence(sentence: str) -> dict | None:
 
     # Pre-check: detect "My X is Y" pattern where X is a relationship/role noun
     # This prevents the copula from being skipped when the object starts with a verb-form word
-    _MY_REL_NOUNS_EARLY = frozenset({
-        "manager", "boss", "supervisor", "director",
-        "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
-        "brother", "sister", "mother", "father", "mom", "dad",
-        "son", "daughter", "aunt", "uncle", "cousin",
-        "grandmother", "grandfather", "grandma", "grandpa",
-        "friend", "coworker", "colleague", "neighbor", "mentor",
-        "teacher", "professor", "therapist", "doctor", "lawyer", "dentist",
-        "pet", "dog", "cat", "favorite",
-        "name", "birthday", "email", "phone", "age", "salary",
-    })
+    from lore_memory.lexicons import REL_NOUNS_FOR_MY_PATTERN as _MY_REL_NOUNS_EARLY
     _is_my_rel_pattern = False
     if tokens[0] == "my" and len(tokens) >= 3:
         for k in range(1, min(4, len(tokens))):
@@ -810,6 +806,22 @@ def parse_sentence(sentence: str) -> dict | None:
     if not obj or len(obj) < 1:
         return None
 
+    # Phase 4b: "verb from X to Y" → treat as "verb to Y"
+    # "moved from Berlin to Tokyo" must supersede "moved to Berlin"; keeping
+    # "from" as the preposition would yield predicate=move_from (no alias).
+    if prep == "from":
+        lower_tokens = [t.lower().strip(".,!?;:\"'") for t in obj_tokens]
+        try:
+            to_idx = lower_tokens.index("to", 1)
+        except ValueError:
+            to_idx = -1
+        if 0 < to_idx < len(obj_tokens) - 1:
+            prep = "to"
+            obj_tokens = obj_tokens[to_idx + 1:]
+            obj = " ".join(obj_tokens).strip()
+            if not obj:
+                return None
+
     # Phase 5: Detect temporal markers in object
     valid_until, cleaned_obj = _detect_temporal(obj)
     if cleaned_obj and len(cleaned_obj) >= 1:
@@ -836,22 +848,22 @@ def parse_sentence(sentence: str) -> dict | None:
             if not obj:
                 obj = " ".join(obj_tokens).strip(".,!?;:\"'")
 
+    # Copula + number [years [old]] → age.  "I am 34", "I'm 35 now",
+    # "I am 34 years old" all collapse to predicate="age", object=<digits>.
+    if predicate in ("am", "is", "be") and obj_tokens:
+        _first = obj_tokens[0].strip(".,!?;:\"'")
+        if _first.isdigit() and 0 < int(_first) < 130:
+            predicate = "age"
+            obj = _first
+
     # Build subject text
     subj_text = " ".join(words[:subj_end]).strip(".,!?;:\"'")
 
     # --- "My X is Y" → predicate=X when X is a relationship/role noun ---
-    _RELATIONSHIP_NOUNS = frozenset({
-        "manager", "boss", "supervisor", "director",
-        "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
-        "brother", "sister", "mother", "father", "mom", "dad",
-        "son", "daughter", "aunt", "uncle", "cousin",
-        "grandmother", "grandfather", "grandma", "grandpa",
-        "friend", "coworker", "colleague", "neighbor", "mentor",
-        "teacher", "professor", "therapist", "doctor", "lawyer", "dentist",
-        "pet", "dog", "cat",
-        "name", "birthday", "email", "phone", "age", "salary",
-        "favorite",
-    })
+    from lore_memory.lexicons import REL_NOUNS_FOR_MY_PATTERN as _RELATIONSHIP_NOUNS
+    # _ATTRIBUTE_NOUNS is narrower than REL_NOUNS_FOR_MY_PATTERN: it drives the
+    # "my wife's NAME is Emma" → predicate=name special case. Kept local
+    # because it overlaps with _RELATIONSHIP_NOUNS by design.
     _ATTRIBUTE_NOUNS = {"name", "birthday", "job", "role", "age", "email",
                         "phone", "title", "address", "salary"}
 
@@ -887,6 +899,16 @@ def parse_sentence(sentence: str) -> dict | None:
         elif found_rel:
             # "My manager is Sarah Chen" → predicate=manager
             predicate = _norm(found_rel)
+
+    # First-person "I left / quit / resigned from <Org>" → retract works_at.
+    # Gated on a capitalized object so "I left the gym" doesn't hijack
+    # the job slot. The companion "and joined Y" clause (compound-split
+    # upstream) then fills works_at via the join→works_at alias.
+    if (lemma in ("leave", "quit", "resign")
+            and subj_text.lower().strip() in ("i", "me")
+            and obj and obj[0].isupper()):
+        predicate = "works_at"
+        is_negation = True
 
     return {
         "subject": subj_text,
@@ -1045,16 +1067,7 @@ def extract_personal(text: str, user_id: str, subject: str = "",
         obj = parsed["object"]
 
         # Check if subject is a third-party reference ("My brother", "My manager")
-        _TP_RELATIONSHIP_NOUNS = frozenset({
-            "manager", "boss", "supervisor", "director",
-            "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
-            "brother", "sister", "mother", "father", "mom", "dad",
-            "son", "daughter", "aunt", "uncle", "cousin",
-            "grandmother", "grandfather", "grandma", "grandpa",
-            "friend", "coworker", "colleague", "neighbor", "mentor",
-            "teacher", "professor", "therapist", "doctor", "lawyer", "dentist",
-            "pet", "dog", "cat", "parents", "kids", "children", "family",
-        })
+        from lore_memory.lexicons import THIRD_PARTY_SUBJECT_NOUNS as _TP_RELATIONSHIP_NOUNS
         is_third_party_my = False
         if subj_lower.startswith("my "):
             rest_words = subj_lower[3:].split()

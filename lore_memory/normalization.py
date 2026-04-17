@@ -28,21 +28,12 @@ from lore_memory.store import cosine_sim
 # ---------------------------------------------------------------------------
 
 # First-person references that always resolve to the session user
-_FIRST_PERSON = frozenset({
-    "i", "me", "my", "myself", "mine",
-    "user", "current_user", "the user",
-})
-
-_RELATIONSHIP_NOUNS = frozenset({
-    "manager", "boss", "supervisor", "director",
-    "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
-    "brother", "sister", "mother", "father", "mom", "dad",
-    "son", "daughter", "aunt", "uncle", "cousin",
-    "grandmother", "grandfather", "grandma", "grandpa",
-    "friend", "coworker", "colleague", "neighbor", "mentor",
-    "teacher", "professor", "pet", "dog", "cat",
-    "team", "parents", "family",
-})
+from lore_memory.lexicons import (
+    FIRST_PERSON_SUBJECTS,
+    FIRST_PERSON_ALIASES,
+    SUBJECT_RESOLVER_RELATIONSHIP_NOUNS as _RELATIONSHIP_NOUNS,
+)
+_FIRST_PERSON = FIRST_PERSON_SUBJECTS | FIRST_PERSON_ALIASES
 
 
 @dataclass

@@ -34,11 +34,8 @@ from lore_memory.store import Memory
 # These are entity boundary markers, not grammar rules
 _BOUNDARY_CHARS = frozenset(".,;:!?()[]{}\"'")
 
-# Common first-person markers for subject detection
-_SELF_MARKERS = frozenset({
-    "i", "me", "my", "i'm", "im", "i've", "ive",
-    "i'll", "ill", "i'd", "id", "myself",
-})
+# Common first-person markers for subject detection (with contractions)
+from lore_memory.lexicons import FIRST_PERSON_WITH_CONTRACTIONS as _SELF_MARKERS
 
 
 def _extract_entities(text: str) -> list[str]:
@@ -123,7 +120,8 @@ def detect_source_type(text: str) -> SourceType:
             return SourceType("email_signature", 0.85)
 
     # Git commit: starts with type(scope): or type:
-    if re.match(r'^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)\s*(\([^)]+\))?\s*:', text_stripped):
+    from lore_memory.lexicons import COMMIT_MSG_RE as _COMMIT_RE
+    if _COMMIT_RE.match(text_stripped):
         return SourceType("commit", 0.9)
 
     # Social media: has @ or # markers

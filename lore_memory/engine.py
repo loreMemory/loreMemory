@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lore_memory.belief import check_contradictions, check_cross_scope_contradictions, consolidate as run_consolidation, canon, ALIASES as BELIEF_ALIASES
+from lore_memory.schema import Schema, PERSONAL_LIFE_SCHEMA
 from lore_memory.dedup import DedupEngine, DedupResult, ProvenanceTracker
 from lore_memory.extraction import extract_personal, extract_chat, extract_company, _norm, Extractor
 from lore_memory.extraction_gf import GrammarFreeExtractor
@@ -30,28 +31,26 @@ from lore_memory.scopes import Scope, Context, scope_db_path, can_access
 from lore_memory.store import Memory, MemoryDB
 
 
-_COMMIT_PREFIXES = (
-    "fix", "feat", "chore", "refactor", "docs",
-    "style", "perf", "ci", "build", "revert",
-)
-_COMMIT_MSG_RE = re.compile(
-    r'^(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert)\s*(\([^)]+\))?\s*:'
-)
+from lore_memory.lexicons import COMMIT_TYPE_PREFIXES as _COMMIT_PREFIXES
+from lore_memory.lexicons import COMMIT_MSG_RE as _COMMIT_MSG_RE
+
 _VOWELS = set("aeiouAEIOU")
 
 
 def _is_profile_worthy(f) -> bool:
     """Return True if a fact should appear in a user profile.
 
-    Filters out garbage predicates (single-char, no vowels, too long) and
-    commit-origin facts that leak into personal profiles.
+    Structural garbage filter only: reject parser debris (length extremes,
+    vowel-less predicates, commit artifacts). Do NOT gate on a vocabulary
+    allowlist — rank-by-evidence is the ranking layer's job.
     """
     pred = f.predicate
     # Skip raw-text bucket
     if pred == "stated":
         return False
-    # Single-character predicates are always garbage (e.g. pred='a')
-    if len(pred) <= 1:
+    # Predicates shorter than 3 chars are almost always parser noise
+    # (e.g. "se", "am", "is").
+    if len(pred) <= 2:
         return False
     # Overly long predicates are parsing artifacts
     if len(pred) > 25:
@@ -66,6 +65,10 @@ def _is_profile_worthy(f) -> bool:
     # Source text that looks like a conventional commit message
     if f.source_text and _COMMIT_MSG_RE.match(f.source_text):
         return False
+    # Object sanity: empty/too-short/too-long objects are parser debris
+    obj = (f.object_value or "").strip()
+    if len(obj) < 2 or len(obj) > 80:
+        return False
     return True
 
 
@@ -77,6 +80,18 @@ class Config:
     data_dir: str = "./lore_data"
     embedding_dims: int = 384
     db_cache_max: int = DB_CACHE_MAX
+    # Prompt-injection defense: classify every store() and flag suspicious
+    # text as source_type="suspicious", excluding it from profile_compact
+    # and wrapping it in untrusted delimiters when recalled to LLM context.
+    # Adds ~1ms per insert. Disable only for trusted batch-ingest pipelines
+    # where the input is guaranteed safe.
+    injection_defense: bool = True
+    # Hypothetical detection: classify text as a hedge/conditional/
+    # speculation and, if so, store each resulting memory with lower
+    # posterior and metadata["hypothetical"]=True, and skip the
+    # supersession check. Keeps "if I get the offer I'll move" and
+    # "maybe I'll quit" from overwriting real facts.
+    hypothetical_detection: bool = True
 
 
 @dataclass
@@ -104,10 +119,15 @@ class Engine:
     """
 
     def __init__(self, config: Config | None = None,
-                 extractor: Extractor | None = None) -> None:
+                 extractor: Extractor | None = None,
+                 schema: Schema | None = None) -> None:
         self.config = config or Config()
         self._data = Path(self.config.data_dir)
         self._data.mkdir(parents=True, exist_ok=True)
+        # Identity schema: which predicates supersede, alias, and decay.
+        # Default is the personal-life / English knowledge-worker schema —
+        # exactly the behavior prior to Phase 2 Step 6.
+        self._schema: Schema = schema or PERSONAL_LIFE_SCHEMA
 
         # Embedding: auto-detect best available, no user config needed
         self._dims = self.config.embedding_dims
@@ -137,25 +157,68 @@ class Engine:
         self._db_cache_max = self.config.db_cache_max
         self._purged_paths: set[str] = set()
 
+        # Prompt-injection classifier — tags suspicious-looking writes so
+        # they are never surfaced verbatim into LLM context. Use a lambda
+        # closure so the classifier always sees the current _embed (which
+        # callers may override on the public Memory wrapper).
+        from lore_memory.safety import InjectionClassifier, HypotheticalClassifier
+        self._injection_clf = InjectionClassifier(lambda t: self._embed(t))
+        # Hypothetical classifier — flags conditional / speculative text so
+        # it's stored with lower posterior and never supersedes a fact.
+        self._hypothetical_clf = HypotheticalClassifier(lambda t: self._embed(t))
+
+    # Process-level singleton — loading sentence-transformers is expensive
+    # (~5 s, ~500 MB RAM) and every Engine instance wants the same model.
+    # Load once per process; subsequent Engines reuse it for free.
+    _ST_MODEL_CACHE: "object | None" = None
+    _ST_PROBED: bool = False
+    _ST_LOCK = threading.Lock()
+
     def _init_embeddings(self):
-        """Auto-detect best available embedding model. No user config needed."""
-        try:
-            from sentence_transformers import SentenceTransformer
-            self._st_model = SentenceTransformer('all-MiniLM-L6-v2')
-            self._dims = 384
-            return self._st_embed
-        except ImportError:
-            return self._hash_embed
+        """Return the embed fn. The sentence-transformers model is cached
+        at the class level so the first Engine in a process pays the ~5 s
+        load cost and every subsequent Engine is instant. If the library
+        isn't installed, fall back to a fast hash embed transparently.
+        """
+        self._dims = 384
+        return self._st_embed
+
+    def _ensure_st_model(self) -> bool:
+        """Load the process-level sentence-transformer singleton.
+
+        Returns True if the real model is ready, False if we fell back
+        to the hash embed (library not installed).
+        """
+        if Engine._ST_PROBED:
+            return Engine._ST_MODEL_CACHE is not None
+        with Engine._ST_LOCK:
+            if Engine._ST_PROBED:
+                return Engine._ST_MODEL_CACHE is not None
+            try:
+                from sentence_transformers import SentenceTransformer
+                Engine._ST_MODEL_CACHE = SentenceTransformer('all-MiniLM-L6-v2')
+            except ImportError:
+                Engine._ST_MODEL_CACHE = None
+            Engine._ST_PROBED = True
+            return Engine._ST_MODEL_CACHE is not None
 
     def _st_embed(self, text: str) -> list[float]:
-        """Real semantic embeddings via sentence-transformers (with LRU cache)."""
+        """Real semantic embeddings via the shared sentence-transformers
+        singleton (with per-Engine LRU cache). Falls back to hash embed if
+        the library isn't available in this environment.
+        """
         key = text[:200]
         cached = self._embed_cache.get(key)
         if cached is not None:
             return cached
-        emb = self._st_model.encode(text).tolist()
+
+        if not self._ensure_st_model():
+            # Library not installed anywhere — fall back permanently.
+            self._embed = self._hash_embed
+            return self._hash_embed(text)
+
+        emb = Engine._ST_MODEL_CACHE.encode(text).tolist()
         if len(self._embed_cache) >= self._EMBED_CACHE_MAX:
-            # Evict oldest entry
             oldest = next(iter(self._embed_cache))
             del self._embed_cache[oldest]
         self._embed_cache[key] = emb
@@ -242,6 +305,8 @@ class Engine:
                 scope="private", context="personal", subject=subject or user_id)
             mems.extend(gf_mems)
 
+        self._apply_write_flags(mems, text)
+
         return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
                           source_tool=source_tool)
 
@@ -251,6 +316,7 @@ class Engine:
         normalizer = self._get_normalizer(user_id)
         normalizer.learn_from_text(text)
         mems = extract_chat(text, user_id, speaker, session_id, extractor=self._extractor)
+        self._apply_write_flags(mems, text)
         return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
                           source_tool=source_tool)
 
@@ -357,6 +423,7 @@ class Engine:
         results = self._retriever.search(
             query, dbs, context=context, top_k=top_k,
             weight_key=f"{user_id}:{context or 'all'}",
+            user_id=user_id,
         )
         return results
 
@@ -474,7 +541,7 @@ class Engine:
         if org_id:
             dbs.append(self._db(Scope.SHARED, org_id=org_id))
         for db in dbs:
-            r = run_consolidation(db, replay_traces=replay_traces)
+            r = run_consolidation(db, replay_traces=replay_traces, schema=self._schema)
             total["archived"] += r["archived"]
             total["decayed"] += r["decayed"]
             total["replayed"] += r.get("replayed", 0)
@@ -510,8 +577,12 @@ class Engine:
         lines: list[str] = []
         token_est = 0  # rough: 1 token ≈ 4 chars
 
+        from lore_memory.safety import SUSPICIOUS_SOURCE_TYPE
         for f in facts:
             if not f.is_active or not _is_profile_worthy(f):
+                continue
+            # Injection-flagged memories never enter an LLM context directly.
+            if f.source_type == SUSPICIOUS_SOURCE_TYPE:
                 continue
             neg = "not " if f.is_negation else ""
             line = f"{f.predicate}: {neg}{f.object_value}"
@@ -525,6 +596,71 @@ class Engine:
 
     def get_weights(self, user_id: str, context: str = "all") -> dict:
         return self._retriever.get_weights(f"{user_id}:{context}").to_dict()
+
+    @property
+    def schema(self) -> Schema:
+        """The schema governing identity rewrites, supersession, and decay."""
+        return self._schema
+
+    def _apply_write_flags(self, mems: list[Memory], raw_text: str) -> None:
+        """Tag each memory with write-time safety + provenance flags.
+
+        Three tags can be applied, mutating mems in place:
+          * source_type = "suspicious" — the raw input looks like a
+            prompt-injection payload.
+          * metadata["hypothetical"] = True — the input is a hedge /
+            conditional / speculation; confidence is halved and the
+            supersession check is skipped downstream.
+          * metadata["source_speaker"] = <speaker> — the grammar
+            parser's subject contained a reported-speech verb; the fact
+            is attributed, not the user's own assertion.
+        """
+        from lore_memory.safety import SUSPICIOUS_SOURCE_TYPE, detect_speaker
+
+        is_injection = (self.config.injection_defense
+                        and self._injection_clf.is_injection(raw_text))
+        is_hypothetical = (self.config.hypothetical_detection
+                           and self._hypothetical_clf.is_hypothetical(raw_text))
+
+        for m in mems:
+            if is_injection:
+                m.source_type = SUSPICIOUS_SOURCE_TYPE
+            if is_hypothetical:
+                m.metadata = dict(m.metadata or {})
+                m.metadata["hypothetical"] = True
+                # Halve the stored confidence — posterior follows.
+                m.confidence = min(m.confidence, 0.35)
+            # Reported-speech attribution: "My wife said we..." → speaker
+            # = "My wife", fact is about the speaker's claim, not user.
+            speaker = detect_speaker(m.subject) if m.subject else None
+            if speaker:
+                m.metadata = dict(m.metadata or {})
+                m.metadata["source_speaker"] = speaker
+                m.subject = speaker
+                m.confidence = min(m.confidence, 0.45)
+
+    def _ensure_schema_compatible(self, user_id: str) -> None:
+        """Record the current schema hash on first open; warn on mismatch.
+
+        This does not block: past data remains readable and new writes follow
+        the new rules. It just surfaces a schema change in the logs so the
+        caller isn't silently confused about supersession/decay behavior.
+        """
+        import logging
+        db = self._db(Scope.PRIVATE, user_id=user_id)
+        stored = db.get_meta("schema_hash")
+        current = self._schema.hash_key()
+        if stored is None:
+            db.set_meta("schema_hash", current)
+            return
+        if stored != current:
+            logging.getLogger("lore_memory").warning(
+                "Schema hash changed for user_id=%s (was %s, now %s). "
+                "Past facts keep their stored predicates; new writes follow "
+                "the new schema. If this is unintentional, re-open with the "
+                "previous Schema to avoid behavioral drift.",
+                user_id, stored, current)
+            db.set_meta("schema_hash", current)
 
     # --- Internal ---
 
@@ -586,12 +722,18 @@ class Engine:
 
             # Skip contradiction checks for "stated" predicate — raw text
             # memories are never single-valued and never contradict each other.
-            if mem.predicate != "stated":
-                contradicted = check_contradictions(db, mem)
+            # Skip supersession for hypothetical / attributed facts:
+            # a conditional ("if I quit") or a reported claim ("my wife
+            # said we should move") must not overwrite real user facts.
+            _md = mem.metadata or {}
+            _skip_supersede = _md.get("hypothetical") or _md.get("source_speaker")
+            if mem.predicate != "stated" and not _skip_supersede:
+                contradicted = check_contradictions(db, mem, schema=self._schema)
                 result.contradictions += len(contradicted)
                 if cross_scope_dbs:
                     cross = check_cross_scope_contradictions(
-                        cross_scope_dbs, mem.subject, mem.predicate, mem.object_value)
+                        cross_scope_dbs, mem.subject, mem.predicate, mem.object_value,
+                        schema=self._schema)
                     result.contradictions += len(cross)
 
             dup = db.put(mem)

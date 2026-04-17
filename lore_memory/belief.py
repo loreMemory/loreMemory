@@ -4,6 +4,13 @@ Belief revision — v3 improvements:
 - Source-weighted posterior (user_stated > inferred)
 - Negation-aware: "likes Java" contradicts "doesn't like Java"
 - Consolidation with soft-delete recovery
+
+Schema awareness (Phase 2 Step 6):
+The ALIASES / SINGLE_VALUED / DECAY_FACTORS module-level names are kept
+as back-compat shims that read from PERSONAL_LIFE_SCHEMA. All new code
+should pass a Schema explicitly through check_contradictions /
+check_cross_scope_contradictions / consolidate. Defaulting to the personal
+schema preserves pre-refactor behavior for every existing caller.
 """
 
 from __future__ import annotations
@@ -11,57 +18,37 @@ from __future__ import annotations
 import math
 import time
 from lore_memory.store import Memory, MemoryDB
+from lore_memory.schema import Schema, PERSONAL_LIFE_SCHEMA
 
-ALIASES: dict[str, str] = {
-    # Grammar parser produces base-form predicates (live_in, work_at)
-    # Map them to the canonical forms used in SINGLE_VALUED
-    "live_in": "lives_in", "live_at": "lives_in", "reside_in": "lives_in",
-    "lives_at": "lives_in", "resides_in": "lives_in", "resides_at": "lives_in",
-    "home_city": "lives_in", "located_in": "lives_in",
-    "base_in": "lives_in", "move_to": "lives_in", "relocate_to": "lives_in",
-    "work_at": "works_at", "work_for": "works_at",
-    "employed_at": "works_at", "employed_by": "works_at",
-    "works_for": "works_at", "company": "works_at", "employer": "works_at",
-    "role": "job_title", "position": "job_title", "occupation": "job_title", "job": "job_title",
-    "born_on": "birthday", "date_of_birth": "birthday",
-    "email_address": "email", "phone_number": "phone", "mobile": "phone",
-    "citizen_of": "nationality", "citizenship": "nationality",
-    "mother_tongue": "native_language", "first_language": "native_language",
-}
-
-SINGLE_VALUED: set[str] = {
-    "lives_in", "works_at", "job_title", "email", "phone", "age",
-    "birthday", "nationality", "native_language", "current_project",
-    "relationship_status", "timezone", "name",
-}
-
-DECAY_FACTORS: dict[str, float] = {
-    "birthday": 0.0, "nationality": 0.0, "native_language": 0.0, "name": 0.0,
-    "lives_in": 0.3, "works_at": 0.4, "job_title": 0.4,
-    "likes": 0.2, "dislikes": 0.2, "prefers": 0.3,
-    "current_project": 0.7, "decided": 0.5,
-    "committed": 0.1, "changed_by": 0.1,
-}
+# Back-compat aliases: old code imports these by name from belief.
+# They reflect the default personal schema and are safe to read, but
+# mutating them does NOT affect runtime — schemas are frozen. Prefer
+# passing a Schema explicitly to the functions below.
+ALIASES: dict[str, str] = dict(PERSONAL_LIFE_SCHEMA.aliases)
+SINGLE_VALUED: frozenset[str] = PERSONAL_LIFE_SCHEMA.single_valued
+DECAY_FACTORS: dict[str, float] = dict(PERSONAL_LIFE_SCHEMA.decay_factors)
 
 
-def canon(pred: str) -> str:
-    return ALIASES.get(pred, pred)
+def canon(pred: str, schema: Schema | None = None) -> str:
+    return (schema or PERSONAL_LIFE_SCHEMA).canon(pred)
 
 
-def is_single_valued(pred: str) -> bool:
-    return canon(pred) in SINGLE_VALUED
+def is_single_valued(pred: str, schema: Schema | None = None) -> bool:
+    return (schema or PERSONAL_LIFE_SCHEMA).is_single_valued(pred)
 
 
-def check_contradictions(db: MemoryDB, new_mem: Memory) -> list[str]:
+def check_contradictions(db: MemoryDB, new_mem: Memory,
+                          schema: Schema | None = None) -> list[str]:
     """Check new memory against existing for contradictions. Returns contradicted IDs."""
-    canon_new = canon(new_mem.predicate)
+    s = schema or PERSONAL_LIFE_SCHEMA
+    canon_new = s.canon(new_mem.predicate)
     existing = db.query_by_subject(new_mem.subject)
     contradicted = []
 
     for ex in existing:
         if ex.state != "active":
             continue
-        if canon(ex.predicate) != canon_new:
+        if s.canon(ex.predicate) != canon_new:
             continue
 
         # Case 1: Same predicate, same value, opposite negation → contradiction
@@ -74,7 +61,7 @@ def check_contradictions(db: MemoryDB, new_mem: Memory) -> list[str]:
         # Only when the new memory is a positive assertion (not a negation).
         # "I used to live in Berlin" should NOT supersede "I live in Amsterdam"
         # because the negation is a retraction, not a new location assertion.
-        elif (is_single_valued(new_mem.predicate)
+        elif (s.is_single_valued(new_mem.predicate)
               and ex.object_value != new_mem.object_value
               and not new_mem.is_negation):
             db.add_contradiction(ex.id)
@@ -89,32 +76,35 @@ def check_cross_scope_contradictions(
     subject: str,
     predicate: str,
     object_value: str,
+    schema: Schema | None = None,
 ) -> list[tuple[str, str]]:
     """
     v3: Check for contradictions across multiple scope databases.
 
     Returns list of (db_path, memory_id) for contradicted memories.
     """
-    if not is_single_valued(predicate):
+    s = schema or PERSONAL_LIFE_SCHEMA
+    if not s.is_single_valued(predicate):
         return []
 
-    canon_pred = canon(predicate)
+    canon_pred = s.canon(predicate)
     contradicted = []
     for db in dbs:
         for ex in db.query_by_subject(subject):
             if ex.state != "active":
                 continue
-            if canon(ex.predicate) == canon_pred and ex.object_value != object_value:
+            if s.canon(ex.predicate) == canon_pred and ex.object_value != object_value:
                 db.add_contradiction(ex.id)
                 contradicted.append((db.db_path, ex.id))
     return contradicted
 
 
-STATED_PROTECTION_DAYS = 7  # Raw text memories ("stated") are protected for this many days
+STATED_PROTECTION_DAYS = PERSONAL_LIFE_SCHEMA.stated_protection_days  # back-compat
 
 
 def consolidate(db: MemoryDB, batch_size: int = 1000,
-                replay_traces: dict | None = None) -> dict:
+                replay_traces: dict | None = None,
+                schema: Schema | None = None) -> dict:
     """Run consolidation with memory replay (from NRM).
 
     Phases:
@@ -143,16 +133,17 @@ def consolidate(db: MemoryDB, batch_size: int = 1000,
         if not batch:
             break
         archived_this_batch = 0
+        s = schema or PERSONAL_LIFE_SCHEMA
         for mem in batch:
-            # Protect "stated" (raw text) memories for STATED_PROTECTION_DAYS
+            # Protect "stated" (raw text) memories for stated_protection_days
             # These form the foundation of the system and should not be
             # archived prematurely regardless of confidence
             if mem.predicate == "stated":
                 age_days = (now - mem.created_at) / 86400
-                if age_days < STATED_PROTECTION_DAYS:
+                if age_days < s.stated_protection_days:
                     continue
 
-            decay = DECAY_FACTORS.get(canon(mem.predicate), 0.3)
+            decay = s.decay_for(mem.predicate)
             if decay > 0:
                 days = (now - mem.updated_at) / 86400
                 strength = max(0.1, mem.access_count * mem.posterior)

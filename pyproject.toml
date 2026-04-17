@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loremem-ai"
-version = "1.0.7"
+version = "1.0.8"
 description = "Persistent AI memory for LLMs and AI agents. Local-first. Learns from every interaction."
 readme = "README.md"
 license = "MIT"

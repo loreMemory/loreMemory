@@ -50,6 +50,9 @@ graph_cache.json
 output-v3/
 lore_data/
 
+# Per-run harness output (baseline.json is committed; last_run is ephemeral)
+benchmarks/last_run.json
+
 # OS
 .DS_Store
 Thumbs.db

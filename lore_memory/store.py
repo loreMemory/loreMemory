@@ -137,17 +137,34 @@ class MemoryDB:
             CREATE INDEX IF NOT EXISTS idx_mem_state_context_la ON memories(state, context, last_accessed DESC);
             CREATE INDEX IF NOT EXISTS idx_mem_state_valid ON memories(state, valid_until);
             CREATE INDEX IF NOT EXISTS idx_mem_subj_state ON memories(subject, state);
+            CREATE TABLE IF NOT EXISTS _meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
-        # FTS5 for fast keyword search
+        # FTS5 for fast keyword search. Porter stemmer + unicode61
+        # so queries like "learn" match stored "learning", "move" matches
+        # "moved", "join" matches "joined" — reducing the need to maintain
+        # large query-keyword → predicate lookup tables.
         try:
             c.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                     id, subject, predicate, object_value, source_text,
-                    content='memories', content_rowid='rowid'
+                    content='memories', content_rowid='rowid',
+                    tokenize='porter unicode61 remove_diacritics 2'
                 )
             """)
         except sqlite3.OperationalError:
-            pass  # FTS5 not available — fall back to LIKE
+            # Older SQLite may not support porter — fall back to unicode61.
+            try:
+                c.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                        id, subject, predicate, object_value, source_text,
+                        content='memories', content_rowid='rowid'
+                    )
+                """)
+            except sqlite3.OperationalError:
+                pass  # FTS5 not available at all — fall back to LIKE
         c.commit()
         self._has_fts = self._check_fts()
 
@@ -391,6 +408,103 @@ class MemoryDB:
             self.conn.execute(
                 f"UPDATE memories SET state=?, updated_at=?{extra} WHERE id=?", params)
             self.conn.commit()
+
+    def get_meta(self, key: str) -> str | None:
+        """Read a key/value from the per-DB _meta table."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT value FROM _meta WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Upsert a key/value into the per-DB _meta table."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO _meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value))
+            self.conn.commit()
+
+    def delete_hard(self, mem_id: str) -> bool:
+        """Permanently remove a row from both the main table and FTS index.
+
+        Unlike update_state(state='deleted'), this does a real DELETE so
+        nothing remains on disk (after the next checkpoint/VACUUM).
+        Returns True if a row was removed.
+        """
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM memories WHERE id=?", (mem_id,))
+            if self._has_fts:
+                self.conn.execute("DELETE FROM memories_fts WHERE id=?", (mem_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def delete_hard_by_subject(self, subject: str, predicate: str | None = None) -> int:
+        """Permanently DELETE every row matching subject (and optional predicate)
+        *regardless of state* — active, superseded, archived, or soft-deleted.
+
+        Intended for GDPR-style erasure where nothing must remain. Returns
+        the count of rows removed. Caller should invoke vacuum() after.
+        """
+        with self._lock:
+            if predicate is not None:
+                cur = self.conn.execute(
+                    "DELETE FROM memories WHERE subject=? AND predicate=?",
+                    (subject, predicate))
+            else:
+                cur = self.conn.execute(
+                    "DELETE FROM memories WHERE subject=?", (subject,))
+            if self._has_fts:
+                if predicate is not None:
+                    self.conn.execute(
+                        "DELETE FROM memories_fts WHERE id IN ("
+                        "SELECT id FROM memories WHERE subject=? AND predicate=?)",
+                        (subject, predicate))
+                else:
+                    # FTS rows are gone after the main-table DELETE via
+                    # content='memories' contentless-trigger semantics; still
+                    # explicit to be safe on older SQLite versions.
+                    self.conn.execute(
+                        "DELETE FROM memories_fts WHERE id NOT IN "
+                        "(SELECT id FROM memories)")
+            self.conn.commit()
+            return cur.rowcount
+
+    def vacuum(self) -> None:
+        """Reclaim disk space after hard-deletes. Blocks writers briefly."""
+        with self._lock:
+            self.conn.commit()  # ensure no open txn
+            self.conn.execute("VACUUM")
+
+    def export_all(self) -> list[dict]:
+        """Dump every row (any state) as plain dicts for portability/audit.
+
+        Intended for GDPR-style export. Embeddings are omitted (not
+        human-portable); everything else is included. Returns in insertion
+        order so the export is deterministic.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT id, scope, context, user_id, org_id, repo_id, subject,
+                          predicate, object_value, source_text, is_negation,
+                          source_type, confidence, evidence_count,
+                          contradiction_count, created_at, updated_at,
+                          last_accessed, access_count, valid_until, state,
+                          deleted_at, metadata
+                   FROM memories ORDER BY created_at ASC""").fetchall()
+            import json
+            out: list[dict] = []
+            for r in rows:
+                d = dict(r)
+                # Keep metadata as parsed dict, not string
+                md = d.get("metadata")
+                if isinstance(md, str):
+                    try:
+                        d["metadata"] = json.loads(md)
+                    except Exception:
+                        pass
+                out.append(d)
+            return out
 
     def recover(self, mem_id: str) -> bool:
         """v3: Recover a soft-deleted or archived memory."""

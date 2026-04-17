@@ -99,10 +99,10 @@ Your AI now remembers everything across conversations.
 </td>
 <td align="center" width="33%">
 <br>
-<img src="https://img.shields.io/badge/no-LLM_needed-E8425F?style=for-the-badge" alt="no LLM">
+<img src="https://img.shields.io/badge/no-LLM_at_write-E8425F?style=for-the-badge" alt="no LLM at write">
 <br><br>
-<b>Grammar Extraction</b><br>
-<sub>Parses by sentence structure.<br>No regex. No dictionaries. No LLM.</sub>
+<b>English Grammar Extraction</b><br>
+<sub>Positional parser for English.<br>No LLM required at write time.<br>English-only scope.</sub>
 <br><br>
 </td>
 <td align="center" width="33%">
@@ -120,15 +120,15 @@ Your AI now remembers everything across conversations.
 <img src="https://img.shields.io/badge/%3C50ms-retrieval-29CB5B?style=for-the-badge" alt="<50ms">
 <br><br>
 <b>Fast</b><br>
-<sub>Sub-50ms at 10K facts.<br>~20ms at 1K. No network calls.</sub>
+<sub>~10–20ms retrieval to 10K facts.<br>In-process; no network.</sub>
 <br><br>
 </td>
 <td align="center" width="33%">
 <br>
-<img src="https://img.shields.io/badge/100%25-isolation-8B5CF6?style=for-the-badge" alt="isolation">
+<img src="https://img.shields.io/badge/filesystem-isolation-8B5CF6?style=for-the-badge" alt="isolation">
 <br><br>
-<b>User Isolation</b><br>
-<sub>Separate database per user.<br>Zero data leakage.</sub>
+<b>Private-Scope Isolation</b><br>
+<sub>One SQLite file per user.<br>Shared scope has no row-level ACL.</sub>
 <br><br>
 </td>
 <td align="center" width="33%">
@@ -148,12 +148,12 @@ Your AI now remembers everything across conversations.
 
 |  | **LoreMem** | Cloud alternatives |
 |:--|:----:|:----:|
-| Requires LLM | **No** | Yes |
+| Requires LLM at write | **No** | Yes |
 | Cost | **Free** | $19–249/mo |
 | Works offline | **Yes** | No |
-| Extraction | Grammar-based | LLM-dependent |
-| Self-learning | 7 mechanisms | Limited |
-| User isolation | Physical (file-per-user) | API-level |
+| Extraction | English positional grammar | LLM-dependent |
+| Language scope | English only | Multilingual |
+| Private isolation | Filesystem (file-per-user) | API-level |
 
 </div>
 
@@ -199,7 +199,7 @@ Your AI now remembers everything across conversations.
    (user, live_in, Amsterdam)    (user, work_at, Google)
 ```
 
-Parses English by **grammar position**. No verb dictionaries, no regex, no LLM. Raw text is always FTS5-indexed as a fallback.
+Parses **English** by grammar position — pronouns, copulas, prepositions, and a few irregular verbs are recognised; the rest is structural. Raw text is always FTS5-indexed as a fallback. A `sentence-transformer` is loaded for retrieval and write-time safety classification, not for extraction.
 
 </details>
 
@@ -298,6 +298,30 @@ m.consolidate()                           # decay + replay + archive
 
 <br>
 
+## Scope & Limits
+
+**Language.** English only. The grammar is a positional parser for English; other languages either fail to parse or fall back to FTS5 raw-text indexing.
+
+**Scale tested.** ~1M facts per tenant on a laptop SSD. Write throughput degrades super-linearly with corpus size (measured: ~650/s at 1K, ~90/s at 40K). Retrieval stays bounded (~10ms p50 at 10K). See `benchmarks/` for reproducibility. Larger scales are not yet validated.
+
+**Multi-tenant.** `private` scope is isolated at the filesystem layer: one SQLite file per user. `shared` (org) scope does **not** have per-row ACL today — every member of an org sees every row. Not safe for cross-employee segmentation without an additional check at the application layer.
+
+**Security.** Every `store()` passes through a prompt-injection classifier. Suspicious text is flagged `source_type="suspicious"`, excluded from `profile_compact()`, and wrapped in `<user_stated_untrusted>…</user_stated_untrusted>` delimiters via `MemoryResult.to_llm_context()`. Your LLM system prompt is expected to recognise the delimiters as data, not instructions. The classifier is a sentence-transformer prototype match plus an HTML/XML-tag short-circuit — tune the threshold or disable via `Config(injection_defense=False)` for trusted batch-ingest pipelines.
+
+**Identity schema.** Which predicates can be superseded, how they alias, and how fast they decay is per-tenant. The default `PERSONAL_LIFE_SCHEMA` matches prior behavior. `CARE_TRACKING_SCHEMA` adds `on_medication`, `dose`, `has_diagnosis`, `appointment_on` as single-valued. `RESEARCH_NOTES_SCHEMA` keeps claims multi-valued and zero-decay. Pass via `Memory(..., schema=CARE_TRACKING_SCHEMA)`. The schema hash is persisted per DB; opening with a different schema logs a warning but is not blocked.
+
+**Hypothetical and reported speech.** Conditional / hedged inputs (*"If I get the offer, I'll move to London"*, *"maybe I'll quit next year"*) are flagged `hypothetical=True` in metadata, stored at lower confidence, and **do not supersede factual memories**. Reported speech (*"My wife said we should move to Tokyo"*) is attributed: the parsed speaker becomes the fact's subject and `source_speaker` is recorded in metadata — the fact never overwrites the user's own. Both kinds remain retrievable at reduced retrieval weight. Disable via `Config(hypothetical_detection=False)` for trusted-input pipelines.
+
+**No cloud, no telemetry.** Data never leaves the process. Backups are your responsibility.
+
+<br>
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/loreMemory/loreMemory/main/.github/assets/divider.svg" width="100%">
+</div>
+
+<br>
+
 ## API Reference
 
 <details>
@@ -307,12 +331,26 @@ m.consolidate()                           # decay + replay + archive
 ```python
 m = Memory(user_id="alice", org_id="acme", data_dir="~/.lore-memory")
 
-m.store(text, scope="private")         # Store from natural language
-m.query(query, limit=10)               # 7-channel retrieval
-m.forget(memory_id=...)                # Delete by ID
-m.forget(subject="alice")              # Delete by subject
-m.forget_all()                         # Purge all user data
-m.close()                              # Persist and close
+m.store(text, scope="private")             # Store from natural language
+m.query(query, limit=10)                   # 7-channel retrieval
+m.forget(memory_id=...)                    # Soft-delete by ID
+m.forget(subject="alice", hard=True)       # GDPR-style hard erase + VACUUM
+m.forget_all(hard=True)                    # Remove entire user DB file
+m.export_all()                             # Every row (incl. deleted) as dicts
+m.export_to_jsonl("alice.jsonl")           # Portable audit dump
+m.close()                                  # Persist and close
+
+# Retrieval results that flowed through the injection classifier:
+for r in m.query("who am I?"):
+    r.is_suspicious          # True if write-time classifier flagged it
+    r.to_llm_context()       # wraps suspicious results in untrusted delimiters
+
+# Single-answer query with a margin-based certainty signal:
+r = m.query_one("where do I live?")
+if r.needs_clarification:
+    ask_user(r.alternatives)   # top-1 is within 15% of top-2
+else:
+    use(r.answer.text)         # certainty: fraction top-1 leads top-2
 ```
 
 </details>

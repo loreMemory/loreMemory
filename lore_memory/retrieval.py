@@ -86,14 +86,12 @@ class Weights:
         }
 
 
-_STOPS = frozenset({
-    "the", "is", "at", "in", "on", "of", "to", "and", "or", "an", "it", "be",
-    "as", "do", "by", "for", "was", "are", "has", "had", "not", "but", "its",
-    "he", "she", "we", "my", "what", "which", "who", "this", "that", "am",
-    "been", "have", "does", "did", "will", "would", "can", "could",
-    "about", "with", "from", "into", "where", "when", "how", "all",
-    "me", "him", "them", "you", "your", "our", "their", "tell", "know",
-})
+from lore_memory.lexicons import (
+    FTS_STOPWORDS as _STOPS,
+    QUERY_CONTENT_STOPWORDS,
+    QUERY_INTENT_STOPWORDS,
+    RETRIEVAL_RELATIONSHIP_NOUNS,
+)
 
 
 def tokenize(text: str) -> list[str]:
@@ -169,10 +167,20 @@ class Retriever:
         context: str | None = None,
         top_k: int = 20,
         weight_key: str = "default",
+        user_id: str = "",
     ) -> list[SearchResult]:
         now = time.time()
         q_emb = self.embed(query)
         q_terms = tokenize(query)
+
+        # First-person intent: when the query is about the *user*, the
+        # user's own active facts must always be in the candidate pool
+        # regardless of FTS/vector shortlist — otherwise, as the corpus
+        # grows, a user's own live_in / works_at / likes fact gets
+        # drowned by third-party facts that share the same predicate.
+        _FIRST_PERSON_Q = {"i", "my", "me", "mine", "myself"}
+        _ql_tokens = set(re.findall(r"\b\w+\b", query.lower()))
+        _is_first_person_q = bool(_ql_tokens & _FIRST_PERSON_Q)
 
         # Expand query terms with synonyms for broader FTS recall
         expanded_terms = list(q_terms)
@@ -226,8 +234,16 @@ class Retriever:
                         cands.append(m)
                         seen_ids.add(m.id)
 
-            # Secondary: vector similarity search (finds semantic matches FTS misses)
-            vec_hits = db.vector_search(q_emb, top_k=top_k, context=context)
+            # Secondary: vector similarity search (finds semantic matches FTS
+            # misses). Depth is bounded above top_k so we always consider
+            # predicate-alignment-only matches (e.g. "I joined Anthropic"
+            # for "where do I work?") whose text lacks the query keywords.
+            # top_k * 3 clamped to 25 balances recall (big enough to catch
+            # those) against noise (not so big that unrelated facts outrank
+            # the right answer via diversity penalties).
+            vec_hits = db.vector_search(q_emb,
+                                         top_k=max(min(top_k * 3, 25), top_k),
+                                         context=context)
             for m, sim in vec_hits:
                 if m.id not in seen_ids and m.is_active:
                     cands.append(m)
@@ -249,6 +265,21 @@ class Retriever:
                     if m.id not in seen_ids:
                         cands.append(m)
                         seen_ids.add(m.id)
+
+            # First-person augmentation: if the query is phrased as
+            # first-person ("where do I live?"), pull in the user's own
+            # active facts directly. This guarantees the user's own
+            # identity facts are always considered, no matter how many
+            # third-party facts with the same predicate have accumulated.
+            if _is_first_person_q and user_id:
+                try:
+                    own = db.query_by_subject(user_id, context=context, limit=50)
+                    for m in own:
+                        if m.id not in seen_ids and m.is_active:
+                            cands.append(m)
+                            seen_ids.add(m.id)
+                except Exception:
+                    pass
 
             if not cands:
                 continue
@@ -292,10 +323,8 @@ class Retriever:
             is_broad = any(marker in q_lower for marker in broad_query_markers)
 
             # Check if query has specific intent (from pred map or content words)
-            _STOP_WORDS = {"what", "where", "who", "when", "how", "does",
-                           "do", "is", "are", "the", "a", "an", "my", "i"}
             has_specific_intent = bool(pred_boost) or any(
-                w not in _STOP_WORDS and len(w) > 2
+                w not in QUERY_INTENT_STOPWORDS and len(w) > 2
                 for w in q_lower.split())
 
             # Entity boost: hard boost for memories containing query entities
@@ -349,6 +378,15 @@ class Retriever:
                         rrf *= 1.5  # boost superseded for temporal queries
                     else:
                         rrf *= 0.1  # heavily penalize for non-temporal
+
+                # Hypothetical / attributed facts are recall-accessible
+                # (the user may search for "what did my wife say about
+                # Tokyo?") but must not dominate factual answers.
+                md = m.metadata or {}
+                if md.get("hypothetical"):
+                    rrf *= 0.4
+                if md.get("source_speaker"):
+                    rrf *= 0.6
 
                 # Subject alignment: boost relationship matches, penalize mismatches
                 sa = self._subject_alignment(query, m)
@@ -463,7 +501,12 @@ class Retriever:
     def _subject_alignment(self, query: str, mem: Memory) -> float:
         """Score how well the memory relates to what the query is asking about.
 
-        Two-phase approach:
+        Three-phase approach:
+        0. First-person alignment: when the query is phrased in first person
+           (I / my / me) and doesn't name a specific relationship, additive
+           boost for memories whose subject is the user's id (their own facts).
+           Additive — does not penalise third-person facts, only lifts the
+           user's own into contention above a growing noise floor.
         1. Relationship entity detection: when query mentions a relationship
            (sister, wife, manager), boost memories whose source text or
            subject mentions that relationship.
@@ -471,16 +514,23 @@ class Retriever:
            in the memory's combined text.
         """
         ql = query.lower()
+        q_tokens = set(re.findall(r"\b\w+\b", ql))
+
+        _RELATIONSHIPS = RETRIEVAL_RELATIONSHIP_NOUNS
+        _FIRST_PERSON_Q = {"i", "my", "me", "mine", "myself"}
+        has_first_person_q = bool(q_tokens & _FIRST_PERSON_Q)
+        has_relationship_q = any(rel in ql for rel in _RELATIONSHIPS)
+
+        # Phase 0: the user's own fact on a first-person query, when no
+        # specific relationship is named. Matching-user check is structural:
+        # first-person facts are stored with subject == user_id.
+        if (has_first_person_q and not has_relationship_q
+                and mem.user_id and mem.subject == mem.user_id):
+            return 1.5
 
         # Phase 1: relationship entity detection via source text matching
         # This handles "fiancee"↔"girlfriend", "sister"↔"Maya" etc.
         # by checking if any query content word appears in the source text
-        _RELATIONSHIPS = {
-            "sister", "brother", "mother", "father", "mom", "dad",
-            "wife", "husband", "girlfriend", "boyfriend", "fiancee", "fiance",
-            "partner", "spouse", "manager", "boss", "friend", "colleague",
-            "son", "daughter", "uncle", "aunt", "cousin", "parent", "parents",
-        }
         for rel in _RELATIONSHIPS:
             if rel in ql:
                 combined = f"{mem.subject} {mem.object_value} {mem.source_text}".lower()
@@ -501,10 +551,7 @@ class Retriever:
                 # Don't penalize — just don't boost
 
         # Phase 2: content keyword overlap (generic boost)
-        _STOP = {"what", "where", "who", "when", "how", "does", "do", "is",
-                 "are", "the", "a", "an", "my", "i", "me", "to", "in", "at",
-                 "for", "of", "and", "or", "s"}
-        q_content = set(w.strip("'?.,!") for w in ql.split()) - _STOP
+        q_content = set(w.strip("'?.,!") for w in ql.split()) - QUERY_CONTENT_STOPWORDS
         q_content = {w for w in q_content if len(w) > 2}
 
         if not q_content:
@@ -525,8 +572,10 @@ class Retriever:
         "live": {"live_in", "lives_in", "move_to", "base_in", "reside_in"},
         "located": {"live_in", "lives_in", "base_in"},
         "use": {"use", "prefer", "run_on"},
-        "language": {"use", "speak", "know", "code_in", "write"},
+        "language": {"use", "speak", "know", "code_in", "write",
+                     "learn", "learning", "study"},
         "speak": {"speak", "know"},
+        "learning": {"learn", "learning", "study", "studying"},
         "like": {"like", "love", "enjoy", "prefer", "fan_of"},
         "read": {"read", "reading"},
         "study": {"study", "graduate_from", "major_in", "attend"},
@@ -576,62 +625,72 @@ class Retriever:
     def _predicate_alignment(self, query: str, cands: list[Memory]) -> dict[str, float]:
         """Score memories whose predicate aligns with the query intent.
 
-        Hybrid approach:
-        1. Curated map for known query patterns (fast, precise)
-        2. Keyword overlap between query and predicate/object words
-        3. Semantic embedding fallback for remaining unmatched candidates
+        Semantic-primary hybrid:
+          1. Semantic cosine between the query embedding and each candidate's
+             predicate embedding is computed for *every* candidate. This is
+             the base signal and generalises to any English vocabulary.
+          2. The curated `_QUERY_PRED_MAP` acts as an opt-in precision
+             override for canned query patterns (e.g. "live" → {live_in,
+             lives_in, ...}). When it fires, it promotes the match to 1.0.
+             It is no longer a gate — out-of-map queries still get scored.
+          3. Predicate-token overlap and object/source token overlap are
+             cheap tie-breakers, applied as max() with the semantic base.
         """
         q_lower = query.lower()
 
-        # Phase 1: curated map (fast, precise)
+        # Optional curated map (precision override)
         target_preds: set[str] = set()
         for keyword, preds in self._QUERY_PRED_MAP.items():
             if keyword in q_lower:
                 target_preds.update(preds)
 
-        scores: dict[str, float] = {}
-        needs_semantic: list[Memory] = []
-
-        _STOP = {"what", "where", "who", "when", "how", "does", "do", "is",
-                 "are", "the", "a", "an", "my", "i", "me", "to", "in", "at",
-                 "for", "of", "and", "or", "on", "with", "s"}
-        q_content = set(w.strip("'?.,!") for w in q_lower.split()) - _STOP
+        q_content = set(w.strip("'?.,!") for w in q_lower.split()) - QUERY_CONTENT_STOPWORDS
         q_content = {w for w in q_content if len(w) > 2}
 
+        # Query embedding computed once for the whole candidate set
+        q_emb = self.embed(query)
+
+        scores: dict[str, float] = {}
         for m in cands:
-            if m.predicate in ("stated",):
+            if m.predicate == "stated":
                 continue
 
-            # Map match
-            if target_preds and m.predicate in target_preds:
-                scores[m.id] = 1.0
-                continue
+            # Base: semantic predicate alignment, always.
+            # Cosine threshold 0.3; mapped linearly to [0, 1.0] up to 0.8.
+            pred_emb = self._get_pred_embedding(m.predicate)
+            sim = cosine_sim(q_emb, pred_emb)
+            if sim >= 0.3:
+                base = min(1.0, (sim - 0.3) / 0.5)
+            else:
+                base = 0.0
 
-            # Phase 2: keyword overlap
+            score = base
+
+            # Curated map: precision override — when the user's query uses
+            # a keyword we have a canned mapping for, elevate matches of the
+            # mapped predicates to the top tier. Match on either the raw
+            # predicate or its canonical form so "join" / "joined" etc.
+            # (which canonicalize to works_at) fire on a "work" query.
+            if target_preds:
+                from lore_memory.belief import canon as _canon
+                if m.predicate in target_preds or _canon(m.predicate) in target_preds:
+                    score = max(score, 1.0)
+
+            # Predicate-token overlap (e.g. query "manager" ∩ pred "manager")
             pred_words = set(m.predicate.replace("_", " ").split())
-            overlap = pred_words & q_content
-            if overlap:
-                scores[m.id] = min(1.0, len(overlap) * 0.5)
-                continue
+            pred_overlap = pred_words & q_content
+            if pred_overlap:
+                score = max(score, min(1.0, len(pred_overlap) * 0.5))
 
-            # Check object/source overlap
-            if q_content:
+            # Object/source-text overlap (weak signal, last resort)
+            if q_content and score < 0.4:
                 combined = f"{m.object_value} {m.source_text}".lower()
                 obj_hits = sum(1 for w in q_content if w in combined)
                 if obj_hits >= 2:
-                    scores[m.id] = 0.3
-                    continue
+                    score = max(score, 0.3)
 
-            needs_semantic.append(m)
-
-        # Phase 3: semantic fallback (only when map had no hits and few unmatched)
-        if needs_semantic and not target_preds and len(needs_semantic) <= 20:
-            q_emb = self.embed(query)
-            for m in needs_semantic:
-                pred_emb = self._get_pred_embedding(m.predicate)
-                sim = cosine_sim(q_emb, pred_emb)
-                if sim > 0.5:
-                    scores[m.id] = min(0.7, (sim - 0.35) / 0.5)
+            if score > 0:
+                scores[m.id] = score
 
         return scores
 
