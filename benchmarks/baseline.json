@@ -1,13 +1,13 @@
 {
   "quality": {
     "total": 39,
-    "top1_correct": 31,
-    "top3_correct": 35,
-    "top1_pct": 79.48717948717949,
-    "top3_pct": 89.74358974358974,
-    "p50_ms": 17.223166000000845,
-    "p95_ms": 24.735500000000243,
-    "p99_ms": 72.88608299999844,
+    "top1_correct": 32,
+    "top3_correct": 36,
+    "top1_pct": 82.05128205128206,
+    "top3_pct": 92.3076923076923,
+    "p50_ms": 17.601542000001302,
+    "p95_ms": 24.82920799999988,
+    "p99_ms": 69.46662500000045,
     "per_check": [
       {
         "label": "onboard_name",
@@ -152,9 +152,9 @@
       {
         "label": "supersede_age",
         "q": "how old am I?",
-        "top": "I'm 34 years old",
-        "top1_correct": false,
-        "in_top3": false
+        "top": "I'm 35 now (birthday last month)",
+        "top1_correct": true,
+        "in_top3": true
       },
       {
         "label": "ambig_my_name",
@@ -286,10 +286,10 @@
   },
   "perf": {
     "facts_inserted": 1000,
-    "insert_seconds": 1.8438647919999998,
-    "inserts_per_sec": 542.3391152858459,
-    "retrieval_p50_ms": 8.689374999999444,
-    "retrieval_p95_ms": 9.152333999999485
+    "insert_seconds": 1.798524500000001,
+    "inserts_per_sec": 556.0113303988905,
+    "retrieval_p50_ms": 8.442207999999951,
+    "retrieval_p95_ms": 9.245459000000622
   },
-  "timestamp": 1776396730.9218519
+  "timestamp": 1776452707.915842
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.1.1 — 2026-04-17
+
+Two retriever fixes surfaced by an 8-week end-to-end user simulation.
+
+- **"how old am I?" no longer surfaces superseded age** (`retrieval.py`).
+  Bare `"old"` was in the temporal-keyword set and matched the age idiom
+  as if the user were asking about past state. Replaced with a context
+  regex — `old` only triggers temporal mode when preceded by a possessive
+  or article (`"my old manager"`, `"the old system"`). Bare `"old"` now
+  falls through to present-tense retrieval, so the harness
+  `supersede_age` check returns the current age (baseline top-1 regression
+  it had been silently getting).
+- **"does my neighbor have a pet?" no longer returns the user's pet**
+  (`lexicons.py`). Added `neighbor`, `coworker`, `mentor`, `supervisor`,
+  `roommate` to the retrieval-side relationship-noun set. The subject
+  alignment code already had the right logic (skip the user-subject boost
+  when the query names a specific relationship) — the set just didn't
+  know about these relations.
+
+E2E simulation: 22 / 24 → 24 / 24. Harness: 79.5 % → 82.1 % top-1 (+1
+test, 0 regressions). 390 / 390 tests pass.
+
 ## v1.1.0 — 2026-04-17
 
 LLM-shaped contract: callers that already have an LLM in front (the common

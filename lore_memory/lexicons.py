@@ -86,7 +86,8 @@ THIRD_PARTY_SUBJECT_NOUNS: frozenset[str] = (
 # Retrieval subject-alignment boost list — kinship + the most common
 # professional role words users actually query on.
 RETRIEVAL_RELATIONSHIP_NOUNS: frozenset[str] = KINSHIP_NOUNS | frozenset({
-    "manager", "boss", "friend", "colleague",
+    "manager", "boss", "friend", "colleague", "coworker",
+    "neighbor", "mentor", "supervisor", "roommate",
 })
 
 # Normalization's relationship set — kinship + common pros + team.

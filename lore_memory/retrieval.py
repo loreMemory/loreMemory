@@ -209,15 +209,23 @@ class Retriever:
         w = self.get_weights(weight_key)
         results: list[SearchResult] = []
 
-        # Detect temporal intent: semantic prototype + keyword fallback
+        # Detect temporal intent: semantic prototype + keyword fallback.
+        # "old" is deliberately NOT in the bare keyword set because it
+        # mis-fires on "how old am I?" (age question, not temporal). We
+        # require a possessive/article before "old" to count it temporal
+        # ("my old manager", "the old system") — same for "former" only
+        # as a standalone word (not substring of "performer").
         self._ensure_intents()
         q_lower = query.lower()
         _temp_sim = cosine_sim(q_emb, self._intent_protos["temporal"])
         _TEMPORAL_KEYWORDS = {"before", "previous", "previously", "formerly",
                               "used to", "earlier", "prior", "ago", "past",
-                              "old", "former", "history"}
+                              "former", "history"}
+        _TEMPORAL_OLD_RE = re.compile(
+            r"\b(?:my|the|our|their|his|her|a|an)\s+old\b")
         is_temporal_query = (_temp_sim > 0.25
-                             or any(kw in q_lower for kw in _TEMPORAL_KEYWORDS))
+                             or any(kw in q_lower for kw in _TEMPORAL_KEYWORDS)
+                             or bool(_TEMPORAL_OLD_RE.search(q_lower)))
 
         # Scope alignment: boost shared scope for company/team queries
         _COMPANY_KEYWORDS = {"company", "team", "org", "organization", "startup",
