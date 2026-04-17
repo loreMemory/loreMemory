@@ -197,19 +197,32 @@ class Memory:
 
     _MAX_INPUT_CHARS = 50_000  # ~10K tokens; guards pathological pastes.
 
-    def store(self, text: str, scope: str = "private") -> dict[str, Any]:
+    def store(self, text: str, scope: str = "private",
+              facts: list[dict] | None = None) -> dict[str, Any]:
         """Store a memory from natural text.
 
-        Automatically extracts facts using grammar-based parsing.
-        Raw text is always stored and searchable via FTS.
+        Two paths:
+          1. ``store(text)`` — grammar parser extracts facts. Use this when
+             the caller doesn't know the structure (curl, bash, dumb pipes).
+          2. ``store(text, facts=[{subject, predicate, object}, ...])`` —
+             LLM caller supplies structured triples. The grammar extractor
+             is skipped; the LLM's S-P-O is written directly. Raw text is
+             still saved as a 'stated' row so FTS keyword search and
+             journal continuity work the same.
+
+        Pass ``facts`` from any LLM that can produce JSON: Claude, GPT,
+        Gemini, Llama via Ollama. The schema is the contract — see the
+        MCP and REST tool descriptions for canonical predicates.
 
         Args:
-            text: Natural language text to remember.
+            text: Natural-language utterance. Always stored as the raw row.
             scope: "private" (user-only) or "shared" (org-visible).
+            facts: Optional list of {subject, predicate, object,
+                confidence?, is_negation?} dicts. Subject "user" maps to
+                the caller's user_id. When omitted, grammar extraction runs.
 
         Returns:
             Dict with keys: created, deduplicated, contradictions.
-            Returns all-zero result for empty or None text.
         """
         if text is None:
             return {"created": 0, "deduplicated": 0, "contradictions": 0}
@@ -224,21 +237,35 @@ class Memory:
         if len(text) > self._MAX_INPUT_CHARS:
             text = text[: self._MAX_INPUT_CHARS]
         if scope == "shared" and self._org_id:
-            r = self._engine.store_company(self._user_id, self._org_id, text)
+            r = self._engine.store_company(self._user_id, self._org_id, text,
+                                           facts=facts)
         else:
-            r = self._engine.store_personal(self._user_id, text)
+            r = self._engine.store_personal(self._user_id, text, facts=facts)
         return {"created": r.created, "deduplicated": r.deduplicated,
                 "contradictions": r.contradictions}
 
-    def query(self, query: str, limit: int = 10) -> list[MemoryResult]:
-        """Query memory using natural language.
+    def query(self, query: str, limit: int = 10,
+              predicate_hint: str | list[str] | None = None,
+              subject_hint: str | None = None) -> list[MemoryResult]:
+        """Query memory using natural language, optionally with LLM hints.
 
-        Uses 7-channel retrieval: semantic, keyword, temporal, belief,
-        frequency, graph (spreading activation), and resonance.
+        Two paths:
+          1. ``query(text)`` — current 7-channel retrieval. Works for any
+             caller including raw scripts.
+          2. ``query(text, predicate_hint=..., subject_hint=...)`` — LLM
+             caller hints which canonical predicate / subject the answer
+             lives under. Hints are *boosts*, not filters: a wrong hint
+             never hides a correct answer; a right hint surfaces it
+             instantly without paying for full semantic ranking noise.
 
         Args:
             query: Natural language question or keywords.
             limit: Maximum results to return.
+            predicate_hint: Canonical predicate string or list of strings
+                (e.g. "lives_in", ["job_title", "works_at"]). Matched
+                against canonicalized predicates via Schema.aliases.
+            subject_hint: Subject to favor. Pass "user" to favor the
+                caller's own facts.
 
         Returns:
             List of MemoryResult objects, ranked by relevance.
@@ -246,7 +273,8 @@ class Memory:
         if query is None or not isinstance(query, str) or not query.strip():
             return []
         results = self._engine.recall(
-            self._user_id, query.strip(), org_id=self._org_id, top_k=limit)
+            self._user_id, query.strip(), org_id=self._org_id, top_k=limit,
+            predicate_hint=predicate_hint, subject_hint=subject_hint)
         return [MemoryResult(r) for r in results]
 
     def query_one(self, query: str,

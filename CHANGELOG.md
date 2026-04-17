@@ -1,5 +1,87 @@
 # Changelog
 
+## v1.1.0 — 2026-04-17
+
+LLM-shaped contract: callers that already have an LLM in front (the common
+case) can now hand us structured S-P-O at write time and predicate/subject
+hints at read time. The local grammar parser stays as the fallback for
+non-LLM callers (curl, scripts, the CLI). No new runtime dependencies; no
+LLM in our process — the interface just gives a cooperating LLM a clean
+way to do the cognitive work it's already doing.
+
+### Write — `store(text, facts=...)`
+
+Old: `store("I have a cat named Luna")` → grammar parser guesses
+`(user, have, a cat named Luna)`. Predicate is too generic, retrieval
+struggles at scale.
+
+New: caller passes the original text *plus* the LLM's extraction:
+
+```python
+m.store(
+    "I have a cat named Luna",
+    facts=[{"subject": "user", "predicate": "pet", "object": "Luna"}],
+)
+```
+
+The grammar parser is skipped; the LLM's S-P-O is written directly. Raw
+text is still saved as a `stated` row so FTS keyword recall and the
+journal stay intact. Each fact still flows through dedup, supersession,
+and Schema-driven canonicalization — the LLM can't bypass schema discipline.
+
+### Read — `query(text, predicate_hint=..., subject_hint=...)`
+
+Hints are **boosts, not filters**: a wrong hint never hides a correct
+answer; a right hint surfaces it instantly.
+
+```python
+m.query("what is my job?",
+        predicate_hint=["job_title", "works_at"],
+        subject_hint="user")
+```
+
+A direct `(subject=user, predicate=hobby)` hit gets a 3× predicate boost
+plus a 2× subject boost — enough to lift it above semantic noise even at
+1000+ facts.
+
+### MCP & REST — same shape, both transports
+
+- **MCP** (`mcp/server.py`): `store_memory` and `query_memory` tool
+  schemas extended with the new fields. Tool descriptions list the
+  canonical predicates and show JSON examples — the description IS the
+  prompt that teaches the LLM how to call us.
+- **REST** (`api/server.py`): new `Fact` Pydantic model; `POST /memory`
+  accepts `facts: list[Fact]`; new `POST /memory/query` with
+  `predicate_hint` / `subject_hint`; `GET /memory` accepts hints as
+  query-string params. OpenAPI auto-publishes the schema so OpenAI /
+  Gemini function-calling can import it.
+
+### Measured at 2 100-store stress (1110 facts after dedup)
+
+| Path                                 | Top-1 correct |
+|--------------------------------------|---------------|
+| `store(text)` only (grammar parser)  | 8/10          |
+| `store(text, facts=[...])` (LLM SPO) | **10/10**     |
+
+The two grammar failures (`"what is my job?"`, `"do I have pets?"`) become
+clean hits when the LLM supplies `predicate=job_title` / `predicate=pet`.
+
+### Compatibility
+
+- Existing `store(text)` and `query(text)` calls behave identically.
+- Schema canonicalization still applies — LLM-supplied `lives_in`,
+  `live_in`, `move_to`, `relocated_to` all collapse to canonical
+  `lives_in` via `Schema.aliases`, so supersession works the same way.
+- Subject `"user"` (case-insensitive) is rewritten to the caller's
+  `user_id` so prompts can stay user-agnostic.
+
+### Tests
+
+- 6 new tests in `tests/test_llm_facts.py` covering the write path,
+  schema-skip behavior, subject rewrite, hint-as-boost guarantee, and
+  malformed-fact handling.
+- 390 / 390 pass. Harness unchanged at 79.5 % top-1.
+
 ## v1.0.9 — 2026-04-16
 
 Three correctness fixes uncovered by an adversarial 2 100-store stress run.

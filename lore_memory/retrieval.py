@@ -168,7 +168,25 @@ class Retriever:
         top_k: int = 20,
         weight_key: str = "default",
         user_id: str = "",
+        predicate_hint: str | list[str] | None = None,
+        subject_hint: str | None = None,
     ) -> list[SearchResult]:
+        # Normalize hints into canonical sets the scorer can match against.
+        # Boost — not filter — so a wrong hint never hides a correct answer.
+        from lore_memory.belief import canon as _canon
+        _pred_hint_canon: set[str] = set()
+        if predicate_hint:
+            preds = [predicate_hint] if isinstance(predicate_hint, str) else list(predicate_hint)
+            for p in preds:
+                if not p:
+                    continue
+                p_norm = p.lower().strip().replace(" ", "_")
+                _pred_hint_canon.add(p_norm)
+                _pred_hint_canon.add(_canon(p_norm))
+        _subj_hint = (subject_hint or "").strip()
+        if _subj_hint.lower() == "user" and user_id:
+            _subj_hint = user_id
+
         now = time.time()
         q_emb = self.embed(query)
         q_terms = tokenize(query)
@@ -408,6 +426,20 @@ class Retriever:
                 # Scope alignment: boost shared scope for company/team queries
                 if is_company_query and "shared" in scope_label:
                     rrf *= 1.8
+
+                # LLM-supplied hints (boost, not filter — wrong hints don't
+                # hide answers because the underlying multi-channel score is
+                # still computed). When an LLM client knows the user is
+                # asking about a specific predicate/subject ("what is my
+                # job?" → predicate_hint="job_title"), this lets the
+                # right candidate jump to the top without us having to
+                # guess via embedding similarity.
+                if _pred_hint_canon:
+                    if (m.predicate in _pred_hint_canon
+                            or _canon(m.predicate) in _pred_hint_canon):
+                        rrf *= 3.0
+                if _subj_hint and m.subject == _subj_hint:
+                    rrf *= 2.0
 
                 if rrf > 0:
                     results.append(SearchResult(

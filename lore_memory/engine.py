@@ -285,30 +285,89 @@ class Engine:
     # --- Write API ---
 
     def store_personal(self, user_id: str, text: str, subject: str = "",
-                        source_tool: str = "chat_parser") -> WriteResult:
+                        source_tool: str = "chat_parser",
+                        facts: list[dict] | None = None) -> WriteResult:
+        """Store personal-scope memory.
+
+        If ``facts`` is provided (LLM-supplied S-P-O list), the grammar
+        extractor is skipped and the supplied triples are written directly
+        alongside the standard raw-text 'stated' row. Each fact still goes
+        through the full dedup / canonicalization / supersession pipeline,
+        so an LLM can't bypass schema discipline by writing whatever it
+        wants — predicates are normalized via Schema.aliases on read.
+        """
         db = self._db(Scope.PRIVATE, user_id=user_id)
         normalizer = self._get_normalizer(user_id)
-
-        # Learn name aliases from text (e.g., "My name is Alice")
         normalizer.learn_from_text(text)
 
-        # Grammar-based extraction (primary for sentence-like text)
-        mems = extract_personal(text, user_id, subject, extractor=self._extractor)
+        if facts is not None:
+            mems = self._build_mems_from_facts(
+                user_id=user_id, text=text, facts=facts,
+                scope="private", context="personal", source_tool=source_tool)
+        else:
+            # Grammar-based extraction (primary for sentence-like text)
+            mems = extract_personal(text, user_id, subject, extractor=self._extractor)
 
-        # Grammar-free extraction only for non-sentence formats
-        # Avoids double-extraction and uncapped objects on normal sentences
-        from lore_memory.extraction_gf import detect_source_type
-        st = detect_source_type(text)
-        if st.type != "sentence":
-            gf_mems = self._gf_extractor.extract(
-                text, user_id, source_tool=source_tool,
-                scope="private", context="personal", subject=subject or user_id)
-            mems.extend(gf_mems)
+            # Grammar-free extraction only for non-sentence formats
+            # Avoids double-extraction and uncapped objects on normal sentences
+            from lore_memory.extraction_gf import detect_source_type
+            st = detect_source_type(text)
+            if st.type != "sentence":
+                gf_mems = self._gf_extractor.extract(
+                    text, user_id, source_tool=source_tool,
+                    scope="private", context="personal", subject=subject or user_id)
+                mems.extend(gf_mems)
 
         self._apply_write_flags(mems, text)
 
         return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
                           source_tool=source_tool)
+
+    def _build_mems_from_facts(self, *, user_id: str, text: str,
+                                facts: list[dict], scope: str, context: str,
+                                source_tool: str) -> list:
+        """Build a stated row + one Memory per LLM-supplied fact dict.
+
+        Fact dict shape:
+          {subject, predicate, object, confidence?, is_negation?}
+        Subject 'user' (case-insensitive) is rewritten to user_id.
+        Predicate is normalized; canonicalization is deferred to read time.
+        """
+        from lore_memory.extraction import _norm
+        mems: list = []
+        # Always preserve raw text — same as the grammar path.
+        mems.append(Memory(
+            scope=scope, context=context, user_id=user_id,
+            subject=user_id, predicate="stated",
+            object_value=text[:500], source_text=text[:500],
+            source_type="user_stated", confidence=1.0,
+            metadata={"source_tool": source_tool, "extraction_source": "llm"},
+        ))
+        for f in facts or []:
+            try:
+                raw_pred = (f.get("predicate") or "").strip()
+                obj = (f.get("object") or "").strip()
+                # Reject before _norm — _norm returns "stated" for empty
+                # input, which would silently turn malformed facts into
+                # extra journal rows.
+                if not raw_pred or not obj:
+                    continue
+                subj = (f.get("subject") or user_id).strip()
+                if subj.lower() == "user":
+                    subj = user_id
+                pred = _norm(raw_pred)
+                mems.append(Memory(
+                    scope=scope, context=context, user_id=user_id,
+                    subject=subj, predicate=pred, object_value=obj[:500],
+                    source_text=text[:500],
+                    is_negation=bool(f.get("is_negation", False)),
+                    source_type="user_stated",
+                    confidence=float(f.get("confidence", 0.9)),
+                    metadata={"source_tool": source_tool, "extraction_source": "llm"},
+                ))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return mems
 
     def store_chat(self, user_id: str, text: str, speaker: str = "",
                     session_id: str = "", source_tool: str = "chat_parser") -> WriteResult:
@@ -321,9 +380,17 @@ class Engine:
                           source_tool=source_tool)
 
     def store_company(self, user_id: str, org_id: str, text: str, subject: str = "",
-                       source_tool: str = "company_parser") -> WriteResult:
+                       source_tool: str = "company_parser",
+                       facts: list[dict] | None = None) -> WriteResult:
         db = self._db(Scope.SHARED, org_id=org_id)
-        mems = extract_company(text, user_id, org_id, subject, extractor=self._extractor)
+        if facts is not None:
+            mems = self._build_mems_from_facts(
+                user_id=user_id, text=text, facts=facts,
+                scope="shared", context="company", source_tool=source_tool)
+            for m in mems:
+                m.org_id = org_id
+        else:
+            mems = extract_company(text, user_id, org_id, subject, extractor=self._extractor)
         private_db = self._db(Scope.PRIVATE, user_id=user_id)
         return self._store(db, mems, cross_scope_dbs=[private_db], user_id=user_id,
                           source_tool=source_tool)
@@ -404,7 +471,9 @@ class Engine:
     # --- Read API ---
 
     def recall(self, user_id: str, query: str, org_id: str = "", repo_id_val: str = "",
-               context: str | None = None, top_k: int = 20) -> list[SearchResult]:
+               context: str | None = None, top_k: int = 20,
+               predicate_hint: str | list[str] | None = None,
+               subject_hint: str | None = None) -> list[SearchResult]:
         dbs: list[tuple[MemoryDB, str]] = []
         dbs.append((self._db(Scope.PRIVATE, user_id=user_id), f"private:{user_id}"))
         if org_id:
@@ -424,6 +493,8 @@ class Engine:
             query, dbs, context=context, top_k=top_k,
             weight_key=f"{user_id}:{context or 'all'}",
             user_id=user_id,
+            predicate_hint=predicate_hint,
+            subject_hint=subject_hint,
         )
         return results
 

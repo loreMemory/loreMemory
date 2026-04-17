@@ -40,23 +40,78 @@ def _get_memory() -> Memory:
 TOOLS = [
     {
         "name": "store_memory",
-        "description": "Store a memory from natural language. Extracts facts automatically.",
+        "description": (
+            "Save a memory. ALWAYS pass the user's original text in `text`. "
+            "If you can identify clear subject-predicate-object triples in "
+            "the text, ALSO pass them in `facts` — this gives much better "
+            "recall later than letting the local grammar parser guess.\n\n"
+            "Use canonical predicates whenever possible:\n"
+            "  Identity: name, age, birthday, email, phone, nationality, "
+            "native_language\n"
+            "  Location: lives_in, born_in, from\n"
+            "  Work: works_at, job_title, role, manages, reports_to\n"
+            "  Relations: partner, spouse, sister, brother, mother, father, "
+            "child, friend, manager, colleague, neighbor, pet\n"
+            "  Preferences: likes, loves, dislikes, hates, prefers, favorite_*\n"
+            "  Activities: hobby, plays, drives, owns, learning, studied\n"
+            "  Health: allergic_to, on_medication, has_diagnosis\n\n"
+            "Subject is usually \"user\" (the person speaking). For facts "
+            "about other people, use their name (\"Sarah\", \"my neighbor\").\n\n"
+            "Example: text=\"I have a cat named Luna and I love climbing\", "
+            "facts=[{\"subject\":\"user\",\"predicate\":\"pet\",\"object\":\"Luna\"},"
+            "{\"subject\":\"user\",\"predicate\":\"hobby\",\"object\":\"climbing\"}]"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "Text to remember"},
+                "text": {"type": "string", "description": "Original user utterance — always required"},
+                "facts": {
+                    "type": "array",
+                    "description": "Optional LLM-extracted S-P-O triples. Skip the local grammar parser when supplied.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject":   {"type": "string", "description": "\"user\" or a named entity"},
+                            "predicate": {"type": "string", "description": "Canonical relation (lives_in, pet, hobby, ...)"},
+                            "object":    {"type": "string", "description": "The value"},
+                            "confidence":{"type": "number", "description": "0.0–1.0 (default 0.9)"},
+                            "is_negation":{"type": "boolean", "description": "True for \"I do NOT like X\""},
+                        },
+                        "required": ["subject", "predicate", "object"],
+                    },
+                },
             },
             "required": ["text"],
         },
     },
     {
         "name": "query_memory",
-        "description": "Query stored memories using natural language.",
+        "description": (
+            "Search the user's memory. ALWAYS pass the natural-language "
+            "question as `query`. If the question targets a specific "
+            "attribute, ALSO pass `predicate_hint` (string or list) using "
+            "the canonical predicates listed in store_memory. If asking "
+            "about the user themselves, pass `subject_hint=\"user\"`. "
+            "Hints are boosts, not filters — wrong hints don't hide "
+            "results, but right hints surface the answer instantly.\n\n"
+            "Examples:\n"
+            "  query=\"what is my job?\", predicate_hint=[\"job_title\",\"works_at\"], subject_hint=\"user\"\n"
+            "  query=\"where does my sister live?\", predicate_hint=\"lives_in\"\n"
+            "  query=\"do I have any pets?\", predicate_hint=\"pet\", subject_hint=\"user\""
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Question or keywords"},
+                "query": {"type": "string", "description": "Natural-language question"},
                 "limit": {"type": "integer", "description": "Max results", "default": 5},
+                "predicate_hint": {
+                    "description": "Canonical predicate(s) the answer likely uses. Boost only.",
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                },
+                "subject_hint": {"type": "string", "description": "Subject to favor. Pass \"user\" for first-person questions."},
             },
             "required": ["query"],
         },
@@ -90,12 +145,15 @@ def handle_tool_call(name: str, arguments: dict) -> str:
     m = _get_memory()
 
     if name == "store_memory":
-        result = m.store(arguments["text"])
+        result = m.store(arguments["text"], facts=arguments.get("facts"))
         return json.dumps(result)
 
     elif name == "query_memory":
         limit = arguments.get("limit", 5)
-        results = m.query(arguments["query"], limit=limit)
+        results = m.query(
+            arguments["query"], limit=limit,
+            predicate_hint=arguments.get("predicate_hint"),
+            subject_hint=arguments.get("subject_hint"))
         return json.dumps([r.to_dict() for r in results], indent=2)
 
     elif name == "forget_memory":
