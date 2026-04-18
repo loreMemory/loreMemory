@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.2.1 — 2026-04-18
+
+CI / install fix only — no behavior changes.
+
+- **deps**: `spacy` upper-pinned to `<3.8.10`. spacy 3.8.10+ pulls
+  `thinc>=8.3.12`, which requires Python >=3.10 and breaks our 3.9 matrix.
+  v1.2.0's unbounded `spacy>=3.7,<4` resolved to 3.8.13 in fresh installs
+  and crashed at install time on 3.9. The narrower pin keeps 3.9 working.
+
 ## v1.2.0 — 2026-04-18
 
 spaCy is now the default extractor. The hand-rolled English grammar parser

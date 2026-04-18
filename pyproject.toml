@@ -4,14 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loremem-ai"
-version = "1.2.0"
+version = "1.2.1"
 description = "Persistent AI memory for LLMs and AI agents. Local-first. Learns from every interaction."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 dependencies = [
     "sentence-transformers>=2.0.0",
-    "spacy>=3.7,<4",
+    # Upper bound matters: spacy 3.8.10+ pulls thinc>=8.3.12 which
+    # requires Python>=3.10, breaking our 3.9 matrix. When we drop 3.9
+    # support, this pin can be widened.
+    "spacy>=3.7,<3.8.10",
 ]
 authors = [
     {name = "Lore Contributors"},
