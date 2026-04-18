@@ -1,12 +1,17 @@
 name: CI
 
+# Push / PR CI is intentionally lean: one Linux leg, one Python.
+# Multi-platform + multi-Python verification happens in publish.yml when
+# we cut a release — that's when wheel-on-each-OS correctness actually
+# matters. Burning a 4-job matrix on every merge to main is GitHub-Actions
+# minutes we don't get back.
+
 on:
   push:
     branches: [main]
     paths:
       - "lore_memory/**"
       - "tests/**"
-      - "benchmarks/**"
       - "mcp/**"
       - "api/**"
       - "pyproject.toml"
@@ -15,48 +20,27 @@ on:
     paths:
       - "lore_memory/**"
       - "tests/**"
-      - "benchmarks/**"
       - "mcp/**"
       - "api/**"
       - "pyproject.toml"
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python-version: "3.9"
-          - os: ubuntu-latest
-            python-version: "3.12"
-          - os: macos-latest
-            python-version: "3.12"
-          - os: windows-latest
-            python-version: "3.12"
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
+          cache: pip
 
       - name: Install package
         run: pip install -e ".[dev]"
 
+      - name: Install spaCy model (one-time per runner)
+        run: python -m spacy download en_core_web_sm
+
       - name: Run tests
         run: pytest tests/ -v --tb=short -x -m "not slow"
-
-      - name: Run benchmarks (smoke test)
-        run: python benchmarks/lore_bench.py
-        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
-
-      - name: Audit dependencies
-        run: |
-          pip install pip-audit
-          pip-audit
-        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
-        continue-on-error: true

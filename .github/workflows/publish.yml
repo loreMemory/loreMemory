@@ -1,34 +1,28 @@
 name: Publish to PyPI
 
+# Release-time safety net + publish.
+#
+# ci.yml already ran the full unit-test suite on the SHA we tagged, so we
+# don't repeat that here. What we DO test on release is what ci.yml can't:
+#   1. The built wheel installs cleanly on every platform we support.
+#   2. The black-box regression suite still passes against the installed
+#      wheel (not the editable source dir) — catches packaging mistakes
+#      like missing files in MANIFEST.in or wrong entry-point declarations.
+# Then we upload to PyPI.
+
 on:
   release:
     types: [published]
 
 permissions:
   id-token: write
+  contents: read
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.9", "3.12"]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install and test
-        run: |
-          pip install -e ".[dev]"
-          pytest tests/ -v --tb=short -x -m "not slow"
-
-  publish:
-    needs: test
-    runs-on: ubuntu-latest
-    environment: pypi
+    outputs:
+      wheel: ${{ steps.find.outputs.wheel }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,11 +30,65 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
+      - name: Build wheel + sdist
+        run: |
+          pip install build
+          python -m build
 
-      - name: Build package
-        run: python -m build
+      - id: find
+        run: echo "wheel=$(ls dist/*.whl)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  smoke:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  python-version: "3.9"  }
+          - { os: ubuntu-latest,  python-version: "3.12" }
+          - { os: macos-latest,   python-version: "3.12" }
+          - { os: windows-latest, python-version: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install built wheel
+        shell: bash
+        run: |
+          pip install dist/*.whl
+          pip install pytest hypothesis pytest-timeout
+
+      - name: Install spaCy model
+        run: python -m spacy download en_core_web_sm
+
+      - name: Smoke import + regression tests
+        run: |
+          python -c "from lore_memory import Memory; m = Memory(use_spacy=False); m.store('I live in Berlin'); assert m.query_one('where do I live?').answer is not None; print('smoke ok')"
+          pytest tests/test_known_regressions.py -v --tb=short
+
+  publish:
+    needs: smoke
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

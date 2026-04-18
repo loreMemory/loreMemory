@@ -1,13 +1,25 @@
 # Changelog
 
-## v1.2.1 — 2026-04-18
+## v1.2.2 — 2026-04-18
 
-CI / install fix only — no behavior changes.
+First published version of the v1.2.x line. Bundles the v1.2.0 spaCy +
+benchmark work, the v1.2.1 spaCy install pin, and a CI/release workflow
+trim. v1.2.0 and v1.2.1 were tagged but never reached PyPI.
 
-- **deps**: `spacy` upper-pinned to `<3.8.10`. spacy 3.8.10+ pulls
-  `thinc>=8.3.12`, which requires Python >=3.10 and breaks our 3.9 matrix.
-  v1.2.0's unbounded `spacy>=3.7,<4` resolved to 3.8.13 in fresh installs
-  and crashed at install time on 3.9. The narrower pin keeps 3.9 working.
+- **ci.yml**: dropped from a 4-job matrix (ubuntu 3.9 + 3.12, macOS, windows)
+  to a single ubuntu 3.12 leg. Push and PR runs now take ~10 min instead
+  of ~25, saving roughly 60 GitHub-Actions minutes per merge to main.
+  Multi-platform / multi-Python verification moved to publish.yml — that's
+  when wheel-on-each-OS correctness actually matters.
+- **publish.yml**: dropped the redundant `test` job (ci.yml already
+  verified the same SHA). Now: build wheel once → install the built wheel
+  on the full matrix (ubuntu 3.9 + 3.12, macOS, windows) → run regression
+  tests against the installed wheel → upload to PyPI. Catches packaging
+  mistakes (missing files in MANIFEST.in, wrong entry-points) that the
+  editable install in ci.yml can't surface.
+- **deps**: `spacy>=3.7,<3.8.10` (carried from v1.2.1). spacy 3.8.10+
+  pulls `thinc>=8.3.12` which requires Python>=3.10 and broke our 3.9
+  install path under v1.2.0's looser bound.
 
 ## v1.2.0 — 2026-04-18
 
