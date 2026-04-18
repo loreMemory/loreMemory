@@ -53,3 +53,10 @@ jobs:
       - name: Run benchmarks (smoke test)
         run: python benchmarks/lore_bench.py
         if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
+
+      - name: Audit dependencies
+        run: |
+          pip install pip-audit
+          pip-audit
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
+        continue-on-error: true

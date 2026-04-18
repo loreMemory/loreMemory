@@ -178,13 +178,15 @@ class Memory:
         embedding_dims: int = 64,
         embed_fn: Callable | None = None,
         schema: Schema | None = None,
+        use_spacy: bool = True,
     ) -> None:
         if data_dir is None:
             data_dir = str(Path.home() / ".lore-memory")
         self._user_id = user_id
         self._org_id = org_id
         self._engine = Engine(
-            Config(data_dir=str(data_dir), embedding_dims=embedding_dims),
+            Config(data_dir=str(data_dir), embedding_dims=embedding_dims,
+                   use_spacy=use_spacy),
             schema=schema or PERSONAL_LIFE_SCHEMA,
         )
         if embed_fn is not None:

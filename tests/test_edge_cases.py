@@ -1038,16 +1038,18 @@ class TestGrammarExtraction:
         assert len(structured) >= 1
         assert structured[0].object_value == "Amsterdam"
 
-    def test_negation_detected(self, engine):
+    def test_negation_detected(self, grammar_engine):
         """'I don't like Java' should produce is_negation=True."""
+        engine = grammar_engine
         engine.store_personal("u1", "I don't like Java")
         db = engine._db(Scope.PRIVATE, user_id="u1")
         neg = [m for m in db.query_active() if m.predicate == "like" and m.is_negation]
         assert len(neg) >= 1, "Negation not detected from grammar parser"
         assert neg[0].object_value == "Java"
 
-    def test_retraction_detected(self, engine):
+    def test_retraction_detected(self, grammar_engine):
         """'I used to work at Facebook' should produce is_negation=True."""
+        engine = grammar_engine
         engine.store_personal("u1", "I used to work at Facebook")
         db = engine._db(Scope.PRIVATE, user_id="u1")
         neg = [m for m in db.query_active() if m.predicate == "work_at" and m.is_negation]
@@ -1075,8 +1077,9 @@ class TestGrammarExtraction:
         assert "Berlin" in values, "New city should be active"
         assert "Amsterdam" not in values, "Old city should be superseded"
 
-    def test_various_phrasings(self, engine):
+    def test_various_phrasings(self, grammar_engine):
         """Grammar parser handles phrasings structurally."""
+        engine = grammar_engine
         cases = [
             ("I relocated to Berlin", "relocate_to", "Berlin"),
             ("I graduated from MIT", "graduate_from", "MIT"),
@@ -1509,7 +1512,8 @@ class TestFullConversationalParagraph:
     conversational paragraph with multiple sentences, mixed facts,
     negations, and retractions."""
 
-    def test_multi_sentence_extraction(self, engine):
+    def test_multi_sentence_extraction(self, grammar_engine):
+        engine = grammar_engine
         text = ("I live in Amsterdam. I work at Google. I don't like Java. "
                 "I used to live in Berlin. My name is Marcus.")
         engine.store_personal("u1", text)

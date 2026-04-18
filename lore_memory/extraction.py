@@ -108,8 +108,16 @@ def _is_trivial(text: str) -> bool:
 
     Filters: greetings, acknowledgements, filler, very short non-informational text.
     Does NOT filter: short but factual text like "I use Python" or "Berlin. 3 years."
+
+    Non-English text is ALWAYS preserved — the heuristics below are
+    English-biased (factual markers, info verbs, proper-noun via upper-case
+    are all English assumptions). For text that's mostly non-ASCII, default
+    to non-trivial so multilingual inputs survive as stated rows.
     """
-    t = text.strip().lower()
+    t = text.strip()
+    if t and sum(1 for c in t if ord(c) < 128) / len(t) < 0.5:
+        return False
+    t = t.lower()
 
     # Too short to be meaningful (under 3 words and no factual content)
     words = t.split()
@@ -1051,7 +1059,8 @@ def _extract_numeric_facts(text: str, user_id: str, subject: str,
 # ---------------------------------------------------------------------------
 
 def extract_personal(text: str, user_id: str, subject: str = "",
-                     extractor: Extractor | None = None) -> list[Memory]:
+                     extractor: Extractor | None = None,
+                     use_spacy: bool = False) -> list[Memory]:
     text = text.strip()
     if not text:
         return []
@@ -1060,6 +1069,20 @@ def extract_personal(text: str, user_id: str, subject: str = "",
     now = time.time()
     mems: list[Memory] = []
     seen: set[tuple[str, str]] = set()  # (predicate, object) dedup
+
+    # Parser selection: opt-in spaCy path, default to hand-rolled grammar.
+    # Both branches expose `_extract(sentence) -> list[dict]` so compound
+    # clauses/objects yield multiple triples on the spaCy path while the
+    # grammar path keeps its 1-triple-per-sentence behavior.
+    if use_spacy:
+        from lore_memory.extraction_spacy import (
+            extract_triples_from_sentence as _extract,
+            split_sentences_spacy as _split)
+    else:
+        _split = _split_sentences
+        def _extract(sentence: str) -> list[dict]:
+            r = parse_sentence(sentence)
+            return [r] if r else []
 
     # Layer 1: Raw text memory (skip trivial noise)
     if not _is_trivial(text):
@@ -1071,8 +1094,8 @@ def extract_personal(text: str, user_id: str, subject: str = "",
         ))
 
     # Layer 2: Grammar-based extraction
-    for sentence in _split_sentences(text):
-        parsed = parse_sentence(sentence)
+    for sentence in _split(text):
+      for parsed in _extract(sentence):
         if not parsed:
             continue
 
@@ -1110,6 +1133,7 @@ def extract_personal(text: str, user_id: str, subject: str = "",
             continue
         seen.add(key)
 
+        _meta = {"single_valued": True} if parsed.get("single_valued") else {}
         mems.append(Memory(
             scope="private", context="personal", user_id=user_id,
             subject=mem_subject, predicate=pred, object_value=obj[:500],
@@ -1117,10 +1141,14 @@ def extract_personal(text: str, user_id: str, subject: str = "",
             source_type="user_stated", confidence=conf,
             valid_until=parsed.get("valid_until"),
             created_at=now, updated_at=now, last_accessed=now,
+            metadata=_meta,
         ))
 
-        # Split compound objects into individual facts
-        items = _split_compound_object(pred, obj, source_text=sentence)
+        # Split compound objects into individual facts.
+        # spaCy already emits one triple per conjunct via _extract_one, so
+        # running the source-text splitter on top would re-extract junk
+        # items from neighboring clauses.
+        items = [] if use_spacy else _split_compound_object(pred, obj, source_text=sentence)
         if items:
             for item in items:
                 item_key = (pred, item.lower())
@@ -1148,7 +1176,8 @@ def extract_personal(text: str, user_id: str, subject: str = "",
 
 def extract_chat(text: str, user_id: str, speaker: str = "",
                  session_id: str = "",
-                 extractor: Extractor | None = None) -> list[Memory]:
+                 extractor: Extractor | None = None,
+                 use_spacy: bool = False) -> list[Memory]:
     text = text.strip()
     if not text:
         return []
@@ -1157,6 +1186,12 @@ def extract_chat(text: str, user_id: str, speaker: str = "",
     now = time.time()
     meta = {"session_id": session_id, "speaker": speaker}
     mems: list[Memory] = []
+
+    if use_spacy:
+        from lore_memory.extraction_spacy import (
+            parse_sentence_spacy as _parse, split_sentences_spacy as _split)
+    else:
+        _parse, _split = parse_sentence, _split_sentences
 
     # Raw text memory (skip trivial noise)
     if not _is_trivial(text):
@@ -1169,8 +1204,8 @@ def extract_chat(text: str, user_id: str, speaker: str = "",
         ))
 
     # Grammar-based extraction — both first and third person
-    for sentence in _split_sentences(text):
-        parsed = parse_sentence(sentence)
+    for sentence in _split(text):
+        parsed = _parse(sentence)
         if not parsed:
             continue
 
@@ -1239,7 +1274,8 @@ def extract_chat(text: str, user_id: str, speaker: str = "",
 
 def extract_company(text: str, user_id: str, org_id: str,
                     subject: str = "",
-                    extractor: Extractor | None = None) -> list[Memory]:
+                    extractor: Extractor | None = None,
+                    use_spacy: bool = False) -> list[Memory]:
     text = text.strip()
     if not text:
         return []
@@ -1248,6 +1284,12 @@ def extract_company(text: str, user_id: str, org_id: str,
     now = time.time()
     meta = {"attributed_to": user_id}
     mems: list[Memory] = []
+
+    if use_spacy:
+        from lore_memory.extraction_spacy import (
+            parse_sentence_spacy as _parse, split_sentences_spacy as _split)
+    else:
+        _parse, _split = parse_sentence, _split_sentences
 
     # Raw text memory
     mems.append(Memory(
@@ -1259,8 +1301,8 @@ def extract_company(text: str, user_id: str, org_id: str,
     ))
 
     # Grammar extraction — only third person / "we" / "our"
-    for sentence in _split_sentences(text):
-        parsed = parse_sentence(sentence)
+    for sentence in _split(text):
+        parsed = _parse(sentence)
         if not parsed:
             continue
 

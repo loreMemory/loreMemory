@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from lore_memory.belief import check_contradictions, check_cross_scope_contradictions, consolidate as run_consolidation, canon, ALIASES as BELIEF_ALIASES
+from lore_memory.belief import check_contradictions, check_cross_scope_contradictions, check_loss_events, consolidate as run_consolidation, canon, ALIASES as BELIEF_ALIASES
 from lore_memory.schema import Schema, PERSONAL_LIFE_SCHEMA
 from lore_memory.dedup import DedupEngine, DedupResult, ProvenanceTracker
 from lore_memory.extraction import extract_personal, extract_chat, extract_company, _norm, Extractor
@@ -92,6 +92,13 @@ class Config:
     # supersession check. Keeps "if I get the offer I'll move" and
     # "maybe I'll quit" from overwriting real facts.
     hypothetical_detection: bool = True
+    # Use spaCy-based parser instead of the hand-rolled grammar.
+    # Default since validation: spaCy beat grammar on compound clauses,
+    # compound objects, particle verbs ("Luna passed away"), and "named X"
+    # patterns, with no regression on the 7 documented-bug black-box tests.
+    # Set to False for the legacy grammar parser (faster ~1ms p50 vs 4ms,
+    # but missing the above patterns).
+    use_spacy: bool = True
 
 
 @dataclass
@@ -306,7 +313,8 @@ class Engine:
                 scope="private", context="personal", source_tool=source_tool)
         else:
             # Grammar-based extraction (primary for sentence-like text)
-            mems = extract_personal(text, user_id, subject, extractor=self._extractor)
+            mems = extract_personal(text, user_id, subject, extractor=self._extractor,
+                                    use_spacy=self.config.use_spacy)
 
             # Grammar-free extraction only for non-sentence formats
             # Avoids double-extraction and uncapped objects on normal sentences
@@ -448,7 +456,8 @@ class Engine:
         # Also run grammar-based extraction for sentence-like text
         grammar_mems = extract_personal(text, user_id,
                                         kwargs.get("subject", ""),
-                                        extractor=self._extractor)
+                                        extractor=self._extractor,
+                                        use_spacy=self.config.use_spacy)
         mems.extend(grammar_mems)
 
         return self._store(db, mems, cross_scope_dbs=[], user_id=user_id,
@@ -693,9 +702,29 @@ class Engine:
         is_hypothetical = (self.config.hypothetical_detection
                            and self._hypothetical_clf.is_hypothetical(raw_text))
 
+        # When injection or hypothetical is detected, drop extracted triples —
+        # keep only the raw stated row for audit/recall. Structured triples
+        # from these inputs would otherwise outrank legitimate facts via
+        # recency even with supersession skipped. The journal row remains so
+        # the user can search for what they wrote; it's tagged accordingly.
+        if is_injection:
+            kept: list[Memory] = []
+            for m in mems:
+                if m.predicate == "stated":
+                    m.source_type = SUSPICIOUS_SOURCE_TYPE
+                    kept.append(m)
+            mems[:] = kept
+        elif is_hypothetical:
+            kept2: list[Memory] = []
+            for m in mems:
+                if m.predicate == "stated":
+                    m.metadata = dict(m.metadata or {})
+                    m.metadata["hypothetical"] = True
+                    m.confidence = min(m.confidence, 0.35)
+                    kept2.append(m)
+            mems[:] = kept2
+
         for m in mems:
-            if is_injection:
-                m.source_type = SUSPICIOUS_SOURCE_TYPE
             if is_hypothetical:
                 m.metadata = dict(m.metadata or {})
                 m.metadata["hypothetical"] = True
@@ -793,11 +822,16 @@ class Engine:
 
             # Skip contradiction checks for "stated" predicate — raw text
             # memories are never single-valued and never contradict each other.
-            # Skip supersession for hypothetical / attributed facts:
-            # a conditional ("if I quit") or a reported claim ("my wife
-            # said we should move") must not overwrite real user facts.
+            # Skip supersession for hypothetical / attributed / suspicious facts:
+            #   * conditional ("if I quit") — user hasn't committed
+            #   * reported claim ("my wife said we should move") — not user's own
+            #   * suspicious (prompt-injection-shaped) — must not overwrite real
+            #     facts even though the row is stored for audit
+            from lore_memory.safety import SUSPICIOUS_SOURCE_TYPE as _SUSP
             _md = mem.metadata or {}
-            _skip_supersede = _md.get("hypothetical") or _md.get("source_speaker")
+            _skip_supersede = (_md.get("hypothetical")
+                               or _md.get("source_speaker")
+                               or mem.source_type == _SUSP)
             if mem.predicate != "stated" and not _skip_supersede:
                 contradicted = check_contradictions(db, mem, schema=self._schema)
                 result.contradictions += len(contradicted)
@@ -806,6 +840,10 @@ class Engine:
                         cross_scope_dbs, mem.subject, mem.predicate, mem.object_value,
                         schema=self._schema)
                     result.contradictions += len(cross)
+                # Loss events ("Luna passed away") supersede first-person
+                # possession facts that name the affected entity.
+                lost = check_loss_events(db, mem)
+                result.contradictions += len(lost)
 
             dup = db.put(mem)
             if dup:

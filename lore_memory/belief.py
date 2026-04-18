@@ -59,11 +59,18 @@ def check_contradictions(db: MemoryDB, new_mem: Memory,
             db.add_contradiction(ex.id)
             db.update_state(ex.id, "superseded")
             contradicted.append(ex.id)
-        # Case 2: Single-valued predicate, different value → supersede old
+        # Case 2: Single-valued predicate, different value → supersede old.
+        # Two paths into "single-valued":
+        #   a) the schema's static set (lives_in, works_at, …)
+        #   b) extraction-time inference (e.g. spaCy's "My X is Y" pattern
+        #      sets metadata['single_valued']=True for identity-style facts
+        #      like favorite_color, hobby, current_project — without us
+        #      having to enumerate every possible head noun in the schema)
         # Only when the new memory is a positive assertion (not a negation).
-        # "I used to live in Berlin" should NOT supersede "I live in Amsterdam"
-        # because the negation is a retraction, not a new location assertion.
-        elif (s.is_single_valued(new_mem.predicate)
+        _new_md = new_mem.metadata or {}
+        _is_sv = (s.is_single_valued(new_mem.predicate)
+                  or _new_md.get("single_valued") is True)
+        if (_is_sv
               and ex.object_value != new_mem.object_value
               and not new_mem.is_negation):
             db.add_contradiction(ex.id)
@@ -102,6 +109,57 @@ def check_cross_scope_contradictions(
 
 
 STATED_PROTECTION_DAYS = PERSONAL_LIFE_SCHEMA.stated_protection_days  # back-compat
+
+
+# Predicates that signal an entity is no longer accessible to the user.
+# Triggers supersession of `have`/`own`-family facts whose object names the
+# affected entity. Kept tiny — when a phrase isn't on this list, the user
+# can supersede explicitly via "I no longer have X".
+_LOSS_PREDICATES: frozenset[str] = frozenset({
+    "pass_away", "die", "die_away", "die_off",
+    "leave",  # "Sarah left the company" — paired with works_at upstream
+})
+
+_POSSESSION_PREDICATES: frozenset[str] = frozenset({
+    "have", "own", "has", "owns",
+})
+
+
+def check_loss_events(db: MemoryDB, new_mem: Memory) -> list[str]:
+    """Supersede possession facts when the named entity is reported as lost.
+
+    Trigger: `new_mem` has a loss-signaling predicate (pass_away, die, …)
+    and a non-first-person subject. Action: find existing first-person
+    `have`/`own` facts whose object value equals `new_mem.subject`
+    (case-insensitive) and mark them superseded.
+
+    Example:
+      stored: I → have → Luna   (active)
+      stored: Luna → pass_away → ""   (triggers this)
+      result: I → have → Luna   becomes superseded.
+
+    Returns the list of superseded memory IDs.
+    """
+    if new_mem.predicate not in _LOSS_PREDICATES:
+        return []
+    target = (new_mem.subject or "").strip().lower()
+    if not target or target in ("i", "we", "me", "us", "my"):
+        return []
+
+    superseded: list[str] = []
+    # Scan possession facts and match by exact object_value (case-insensitive).
+    # Cheap: each loss event triggers at most one DB scan over active rows.
+    rows = db.query_active_lightweight(limit=2000)
+    for ex in rows:
+        if ex.state != "active":
+            continue
+        if ex.predicate not in _POSSESSION_PREDICATES:
+            continue
+        if (ex.object_value or "").strip().lower() == target:
+            db.update_state(ex.id, "superseded")
+            db.add_contradiction(ex.id)
+            superseded.append(ex.id)
+    return superseded
 
 
 def consolidate(db: MemoryDB, batch_size: int = 1000,

@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.2.0 — 2026-04-18
+
+spaCy is now the default extractor. The hand-rolled English grammar parser
+remains as an opt-out (`Memory(use_spacy=False)`) for callers who want to
+avoid the dependency or need 1ms-latency extraction over correctness on
+compound clauses. New competitive benchmark scores 50/50 (100%) across
+identity, updates, temporal, negation, multi-tenant, adversarial, scale
+(1K + 10K), and latency (5K, p50<10ms store, <20ms query).
+
+- **extraction**: new `extraction_spacy.py` (~280 LOC) replaces the
+  hand-rolled grammar with a dependency-parser-based extractor. Handles
+  compound clauses ("I use Python and love Rust" → two facts), compound
+  objects ("Python, Go, and Rust" → three facts), particle verbs
+  ("Luna passed away"), the "X named Y" pattern (`have:Luna` instead of
+  `have:a dog`), and xcomp chains ("started learning Rust"). Resolves
+  relative-time phrases ("last week", "yesterday") to absolute timestamps
+  in a `valid_from` field (column wiring still pending).
+- **belief**: new `check_loss_events` rule supersedes `have:X` facts when
+  X has a `pass_away` event. Fixes the documented Luna→Max replacement
+  bug. Also: `check_contradictions` now honors a `metadata['single_valued']`
+  flag so identity-style facts ("My favorite color is blue" → "Actually
+  it's green") supersede correctly without each axis being enumerated in
+  the schema's `single_valued` set.
+- **retrieval**: `_QUERY_PRED_MAP["job"]` no longer aliases to the employer
+  axis (`work_at`); maps to role-axis predicates only. `_predicate_alignment`
+  penalizes wrong-axis structured rows (`pa = -0.5`) when a curated keyword
+  fires, so the right axis wins even when other channels favor a near-miss.
+  First-person augmentation pulls user-subject NON-stated rows separately
+  with `limit=2000`, so the journal flood from third-party noise can't
+  evict the user's own structured facts at scale. Adds `age`/`old`/`role`/
+  `title` keys to `_QUERY_PRED_MAP`.
+- **safety**: `InjectionClassifier.score` now scans per-sentence (not just
+  the whole input), so a single malicious sentence in a multi-sentence
+  payload still trips the threshold. Added 4 prototypes for memory-
+  overwrite attempts ("Forget everything you know..."). When injection
+  or hypothetical is detected, extracted triples are dropped (the journal
+  row is kept for audit) so attack text can't outrank legitimate facts via
+  recency.
+- **bench**: new `benchmarks/competitive_bench.py` — 8-section reproducible
+  harness used to gate releases. Exit code 1 if overall < 95%.
+- **tests**: new `tests/test_known_regressions.py` (13 tests) locking
+  every bug class fixed this release; new `grammar_engine` fixture for
+  tests that assert grammar-parser-specific output.
+- **deps**: `spacy>=3.7,<4` added as a runtime dep. The
+  `en_core_web_sm` model is auto-downloaded on first `Memory()` use
+  (~12 MB, one-time). Set `LORE_SKIP_MODEL_DOWNLOAD=1` to disable
+  auto-fetch in air-gapped environments.
+- **scope**: optimization is English-only by project direction. `_is_trivial`
+  still preserves non-ASCII text (no silent drop) but no further multilingual
+  investment.
+
+302 / 302 tests pass. 50 / 50 competitive benchmark.
+
 ## v1.1.1 — 2026-04-17
 
 Two retriever fixes surfaced by an 8-week end-to-end user simulation.

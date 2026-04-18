@@ -297,10 +297,23 @@ class Retriever:
             # active facts directly. This guarantees the user's own
             # identity facts are always considered, no matter how many
             # third-party facts with the same predicate have accumulated.
+            #
+            # The recency-ordered LIMIT 50 is fine for stated rows, but at
+            # scale it pushes structured user facts (predicate != stated)
+            # out of the candidate pool because the journal accumulates
+            # faster. Pull structured rows separately with a high cap so
+            # they're never displaced by raw-text noise.
             if _is_first_person_q and user_id:
                 try:
                     own = db.query_by_subject(user_id, context=context, limit=50)
                     for m in own:
+                        if m.id not in seen_ids and m.is_active:
+                            cands.append(m)
+                            seen_ids.add(m.id)
+                    structured = db.query_by_subject(
+                        user_id, context=context, limit=2000,
+                        exclude_stated=True)
+                    for m in structured:
                         if m.id not in seen_ids and m.is_active:
                             cands.append(m)
                             seen_ids.add(m.id)
@@ -608,7 +621,11 @@ class Retriever:
     # Curated map for common query patterns (fast, precise)
     _QUERY_PRED_MAP: dict[str, set[str]] = {
         "work": {"work_at", "works_at", "work_for", "employed_at", "be_at", "start_at"},
-        "job": {"work_at", "works_at", "work_for", "be_at", "role", "is_a"},
+        # "job" must mean role/title, not employer. "where do I work?" goes via "work".
+        # Conflating these caused the documented "what is my job?" → returns employer bug.
+        "job": {"job_title", "role", "position", "occupation", "is_a"},
+        "role": {"job_title", "role", "position", "occupation", "is_a"},
+        "title": {"job_title", "role", "position", "occupation"},
         "live": {"live_in", "lives_in", "move_to", "base_in", "reside_in"},
         "located": {"live_in", "lives_in", "base_in"},
         "use": {"use", "prefer", "run_on"},
@@ -635,6 +652,8 @@ class Retriever:
         "reading": {"am", "read"},
         "allergic": {"allergic_to"},
         "birthday": {"is", "birthday", "born_on"},
+        "age": {"age", "duration", "is"},
+        "old": {"age", "duration", "is"},
         "name": {"is", "name", "call"},
         "children": {"have", "own"},
         "kids": {"have", "own"},
@@ -708,13 +727,19 @@ class Retriever:
 
             # Curated map: precision override — when the user's query uses
             # a keyword we have a canned mapping for, elevate matches of the
-            # mapped predicates to the top tier. Match on either the raw
-            # predicate or its canonical form so "join" / "joined" etc.
-            # (which canonicalize to works_at) fire on a "work" query.
+            # mapped predicates to the top tier and PENALIZE non-matching
+            # structured rows. The penalty (negative pa) is what stops
+            # `work_at:Spotify` from drowning `is_a:software engineer` on
+            # "what is my job?" — the curated keyword fired, so a structured
+            # row of the wrong axis is a near-miss, not a candidate.
             if target_preds:
                 from lore_memory.belief import canon as _canon
                 if m.predicate in target_preds or _canon(m.predicate) in target_preds:
-                    score = max(score, 1.0)
+                    score = max(score, 2.0)  # axis match → ×3 boost downstream
+                else:
+                    # Wrong axis when intent is clear: penalize so the right
+                    # axis row wins even if its semantic embedding is weaker.
+                    score = -0.5  # ×0.5 demote downstream
 
             # Predicate-token overlap (e.g. query "manager" ∩ pred "manager")
             pred_words = set(m.predicate.replace("_", " ").split())
